@@ -1,0 +1,34 @@
+# Claude Code internal state
+.claude/
+
+# Go build output
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+
+# Go test output
+*.out
+*.test
+
+# Dependency directories
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config with potential secrets (use config.example.yaml instead)
+config.yaml
+
+# Environment files
+.env
+.env.*
