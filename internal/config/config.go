@@ -11,6 +11,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var apiKeyRegex = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
 // ChannelNameRegex matches valid channel names per PRD 3.1.6:
 // 1-128 chars, [a-zA-Z0-9_./-], no consecutive dots, no leading/trailing dots.
 var ChannelNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_/-](?:\.?[a-zA-Z0-9_/-]){0,127}$`)
@@ -116,6 +118,10 @@ func defaultConfig() *Config {
 }
 
 func Load(path string) (*Config, error) {
+	if path == "" {
+		return nil, fmt.Errorf("config file path is required")
+	}
+
 	cfg := defaultConfig()
 
 	data, err := os.ReadFile(path)
@@ -187,12 +193,6 @@ func applyEnvOverrides(cfg *Config) error {
 				return fmt.Errorf("invalid int for %s: %w", o.env, err)
 			}
 			*(o.target.(*int)) = v
-		case "bool":
-			v, err := strconv.ParseBool(val)
-			if err != nil {
-				return fmt.Errorf("invalid bool for %s: %w", o.env, err)
-			}
-			*(o.target.(*bool)) = v
 		case "duration":
 			v, err := time.ParseDuration(val)
 			if err != nil {
@@ -209,11 +209,36 @@ func (c *Config) Validate() error {
 	if c.Database.DSN == "" {
 		return fmt.Errorf("database.dsn is required")
 	}
+	if c.Database.MaxOpenConns <= 0 {
+		return fmt.Errorf("database.max_open_conns must be positive")
+	}
+	if c.Database.MaxIdleConns <= 0 {
+		return fmt.Errorf("database.max_idle_conns must be positive")
+	}
+	if c.Database.ConnMaxIdleTime <= 0 {
+		return fmt.Errorf("database.conn_max_idle_time must be positive")
+	}
+	if c.Database.ConnMaxLifetime <= 0 {
+		return fmt.Errorf("database.conn_max_lifetime must be positive")
+	}
+
 	if c.Auth.JWTSigningKey == "" {
 		return fmt.Errorf("auth.jwt_signing_key is required")
 	}
 	if len(c.Auth.JWTSigningKey) < 32 {
 		return fmt.Errorf("auth.jwt_signing_key must be at least 32 bytes")
+	}
+	for i, ak := range c.Auth.APIKeys {
+		if len(ak.Key) < 43 {
+			return fmt.Errorf("auth.api_keys[%d].key must be at least 43 characters (base64url-encoded 32 bytes)", i)
+		}
+		if !apiKeyRegex.MatchString(ak.Key) {
+			return fmt.Errorf("auth.api_keys[%d].key contains invalid characters (only [A-Za-z0-9_-] allowed)", i)
+		}
+	}
+
+	if c.WebSocket.PingInterval <= 0 {
+		return fmt.Errorf("websocket.ping_interval must be positive")
 	}
 	if c.WebSocket.OutboundBuffer <= 0 {
 		return fmt.Errorf("websocket.outbound_buffer must be positive")
@@ -221,11 +246,48 @@ func (c *Config) Validate() error {
 	if c.WebSocket.MaxMessageSize <= 0 {
 		return fmt.Errorf("websocket.max_message_size must be positive")
 	}
+	if c.WebSocket.PongTimeout < c.WebSocket.PingInterval {
+		return fmt.Errorf("websocket.pong_timeout must be >= websocket.ping_interval")
+	}
+	for _, origin := range c.WebSocket.AllowedOrigins {
+		if origin != "*" && !strings.HasPrefix(origin, "http://") && !strings.HasPrefix(origin, "https://") {
+			return fmt.Errorf("websocket.allowed_origins: invalid origin %q (must be \"*\" or start with http:// or https://)", origin)
+		}
+	}
+
+	if c.Retention.DefaultTTL <= 0 {
+		return fmt.Errorf("retention.default_ttl must be positive")
+	}
 	if c.Retention.DefaultMaxCount <= 0 {
 		return fmt.Errorf("retention.default_max_count must be positive")
 	}
+	if c.Retention.EvictionInterval <= 0 {
+		return fmt.Errorf("retention.eviction_interval must be positive")
+	}
+	for i, rule := range c.Retention.Rules {
+		if rule.Pattern == "" {
+			return fmt.Errorf("retention.rules[%d].pattern is required", i)
+		}
+		if err := validateRetentionPattern(rule.Pattern); err != nil {
+			return fmt.Errorf("retention.rules[%d].pattern: %w", i, err)
+		}
+		if rule.TTL <= 0 {
+			return fmt.Errorf("retention.rules[%d].ttl must be positive", i)
+		}
+		if rule.MaxCount <= 0 {
+			return fmt.Errorf("retention.rules[%d].max_count must be positive", i)
+		}
+	}
+
 	if c.Shutdown.Timeout <= 0 {
 		return fmt.Errorf("shutdown.timeout must be positive")
+	}
+
+	if c.Server.TLSCert != "" && c.Server.TLSKey == "" {
+		return fmt.Errorf("server.tls_key is required when server.tls_cert is set")
+	}
+	if c.Server.TLSKey != "" && c.Server.TLSCert == "" {
+		return fmt.Errorf("server.tls_cert is required when server.tls_key is set")
 	}
 
 	validLogLevels := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
@@ -238,29 +300,20 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("log.format must be one of json, text")
 	}
 
-	for i, rule := range c.Retention.Rules {
-		if rule.Pattern == "" {
-			return fmt.Errorf("retention.rules[%d].pattern is required", i)
-		}
-		if rule.TTL <= 0 {
-			return fmt.Errorf("retention.rules[%d].ttl must be positive", i)
-		}
-		if rule.MaxCount <= 0 {
-			return fmt.Errorf("retention.rules[%d].max_count must be positive", i)
-		}
-	}
+	return nil
+}
 
-	if c.WebSocket.PongTimeout < c.WebSocket.PingInterval {
-		return fmt.Errorf("websocket.pong_timeout must be >= websocket.ping_interval")
+func validateRetentionPattern(pattern string) error {
+	if strings.HasSuffix(pattern, ".*") {
+		prefix := strings.TrimSuffix(pattern, ".*")
+		if prefix == "" || !ChannelNameRegex.MatchString(prefix) {
+			return fmt.Errorf("prefix %q before .* must be a valid channel name segment", prefix)
+		}
+	} else {
+		if !ChannelNameRegex.MatchString(pattern) {
+			return fmt.Errorf("%q is not a valid channel name or prefix.* pattern", pattern)
+		}
 	}
-
-	if c.Server.TLSCert != "" && c.Server.TLSKey == "" {
-		return fmt.Errorf("server.tls_key is required when server.tls_cert is set")
-	}
-	if c.Server.TLSKey != "" && c.Server.TLSCert == "" {
-		return fmt.Errorf("server.tls_cert is required when server.tls_key is set")
-	}
-
 	return nil
 }
 

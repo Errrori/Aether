@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,7 +31,6 @@ auth:
 		t.Fatalf("Load: %v", err)
 	}
 
-	// Verify defaults
 	if cfg.Server.Addr != ":8080" {
 		t.Errorf("Server.Addr = %q, want :8080", cfg.Server.Addr)
 	}
@@ -88,34 +88,45 @@ func TestLoad_MissingRequiredFields(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "missing dsn",
-			yaml:    `auth:\n  jwt_signing_key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`,
+			name: "missing dsn",
+			yaml: `auth:
+  jwt_signing_key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`,
 			wantErr: "database.dsn is required",
 		},
 		{
-			name:    "missing jwt_signing_key",
-			yaml:    `database:\n  dsn: "postgres://localhost/aether"`,
+			name: "missing jwt_signing_key",
+			yaml: `database:
+  dsn: "postgres://localhost/aether"`,
 			wantErr: "auth.jwt_signing_key is required",
 		},
 		{
-			name:    "jwt_signing_key too short",
-			yaml:    "database:\n  dsn: \"postgres://localhost/aether\"\nauth:\n  jwt_signing_key: \"short\"",
+			name: "jwt_signing_key too short",
+			yaml: `database:
+  dsn: "postgres://localhost/aether"
+auth:
+  jwt_signing_key: "short"`,
 			wantErr: "auth.jwt_signing_key must be at least 32 bytes",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			yaml := stringsToYAML(tt.yaml)
-			path := writeTestConfig(t, yaml)
+			path := writeTestConfig(t, tt.yaml)
 			_, err := Load(path)
 			if err == nil {
 				t.Fatalf("expected error containing %q, got nil", tt.wantErr)
 			}
-			if !contains(err.Error(), tt.wantErr) {
+			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("error = %q, want to contain %q", err.Error(), tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestLoad_EmptyPath(t *testing.T) {
+	_, err := Load("")
+	if err == nil || !strings.Contains(err.Error(), "config file path is required") {
+		t.Errorf("expected error about empty path, got %v", err)
 	}
 }
 
@@ -127,24 +138,13 @@ auth:
   jwt_signing_key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 `)
 
-	envVars := map[string]string{
-		"AETHER_DATABASE_DSN":                  "postgres://overridden/aether",
-		"AETHER_SERVER_ADDR":                   ":9090",
-		"AETHER_LOG_LEVEL":                     "debug",
-		"AETHER_WEBSOCKET_OUTBOUND_BUFFER":     "512",
-		"AETHER_WEBSOCKET_PING_INTERVAL":       "15s",
-		"AETHER_AUTH_JWT_CLOCK_SKEW":           "1m",
-		"AETHER_RETENTION_DEFAULT_MAX_COUNT":   "5000",
-	}
-
-	for k, v := range envVars {
-		os.Setenv(k, v)
-	}
-	defer func() {
-		for k := range envVars {
-			os.Unsetenv(k)
-		}
-	}()
+	t.Setenv("AETHER_DATABASE_DSN", "postgres://overridden/aether")
+	t.Setenv("AETHER_SERVER_ADDR", ":9090")
+	t.Setenv("AETHER_LOG_LEVEL", "debug")
+	t.Setenv("AETHER_WEBSOCKET_OUTBOUND_BUFFER", "512")
+	t.Setenv("AETHER_WEBSOCKET_PING_INTERVAL", "15s")
+	t.Setenv("AETHER_AUTH_JWT_CLOCK_SKEW", "1m")
+	t.Setenv("AETHER_RETENTION_DEFAULT_MAX_COUNT", "5000")
 
 	cfg, err := Load(path)
 	if err != nil {
@@ -174,6 +174,27 @@ auth:
 	}
 }
 
+func TestLoad_EnvProvidesRequired(t *testing.T) {
+	path := writeTestConfig(t, `
+server:
+  addr: ":8080"
+`)
+
+	t.Setenv("AETHER_DATABASE_DSN", "postgres://env/aether")
+	t.Setenv("AETHER_AUTH_JWT_SIGNING_KEY", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Database.DSN != "postgres://env/aether" {
+		t.Errorf("DSN = %q, want from env", cfg.Database.DSN)
+	}
+	if cfg.Auth.JWTSigningKey != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Errorf("JWTSigningKey not set from env")
+	}
+}
+
 func TestLoad_EnvOverrideInvalid(t *testing.T) {
 	path := writeTestConfig(t, `
 database:
@@ -182,8 +203,7 @@ auth:
   jwt_signing_key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 `)
 
-	os.Setenv("AETHER_WEBSOCKET_OUTBOUND_BUFFER", "notanumber")
-	defer os.Unsetenv("AETHER_WEBSOCKET_OUTBOUND_BUFFER")
+	t.Setenv("AETHER_WEBSOCKET_OUTBOUND_BUFFER", "notanumber")
 
 	_, err := Load(path)
 	if err == nil {
@@ -198,6 +218,31 @@ func TestValidate_PositiveConstraints(t *testing.T) {
 		wantErr string
 	}{
 		{
+			name:    "max_open_conns zero",
+			modify:  func(c *Config) { c.Database.MaxOpenConns = 0 },
+			wantErr: "database.max_open_conns must be positive",
+		},
+		{
+			name:    "max_idle_conns zero",
+			modify:  func(c *Config) { c.Database.MaxIdleConns = 0 },
+			wantErr: "database.max_idle_conns must be positive",
+		},
+		{
+			name:    "conn_max_idle_time zero",
+			modify:  func(c *Config) { c.Database.ConnMaxIdleTime = 0 },
+			wantErr: "database.conn_max_idle_time must be positive",
+		},
+		{
+			name:    "conn_max_lifetime zero",
+			modify:  func(c *Config) { c.Database.ConnMaxLifetime = 0 },
+			wantErr: "database.conn_max_lifetime must be positive",
+		},
+		{
+			name:    "ping_interval zero",
+			modify:  func(c *Config) { c.WebSocket.PingInterval = 0 },
+			wantErr: "websocket.ping_interval must be positive",
+		},
+		{
 			name:    "outbound_buffer zero",
 			modify:  func(c *Config) { c.WebSocket.OutboundBuffer = 0 },
 			wantErr: "websocket.outbound_buffer must be positive",
@@ -208,9 +253,19 @@ func TestValidate_PositiveConstraints(t *testing.T) {
 			wantErr: "websocket.max_message_size must be positive",
 		},
 		{
+			name:    "default_ttl zero",
+			modify:  func(c *Config) { c.Retention.DefaultTTL = 0 },
+			wantErr: "retention.default_ttl must be positive",
+		},
+		{
 			name:    "default_max_count zero",
 			modify:  func(c *Config) { c.Retention.DefaultMaxCount = 0 },
 			wantErr: "retention.default_max_count must be positive",
+		},
+		{
+			name:    "eviction_interval zero",
+			modify:  func(c *Config) { c.Retention.EvictionInterval = 0 },
+			wantErr: "retention.eviction_interval must be positive",
 		},
 		{
 			name:    "shutdown timeout zero",
@@ -242,6 +297,21 @@ func TestValidate_PositiveConstraints(t *testing.T) {
 			modify:  func(c *Config) { c.Server.TLSKey = "/path/key.pem" },
 			wantErr: "server.tls_cert is required",
 		},
+		{
+			name:    "api_key too short",
+			modify:  func(c *Config) { c.Auth.APIKeys = []APIKeyEntry{{Key: "short", Description: "test"}} },
+			wantErr: "auth.api_keys[0].key must be at least 43 characters",
+		},
+		{
+			name:    "api_key invalid chars",
+			modify:  func(c *Config) { c.Auth.APIKeys = []APIKeyEntry{{Key: "has spaces and special!@#chars here padding!!!", Description: "test"}} },
+			wantErr: "auth.api_keys[0].key contains invalid characters",
+		},
+		{
+			name:    "allowed_origins invalid format",
+			modify:  func(c *Config) { c.WebSocket.AllowedOrigins = []string{"ftp://bad.example.com"} },
+			wantErr: "websocket.allowed_origins",
+		},
 	}
 
 	for _, tt := range tests {
@@ -254,10 +324,40 @@ func TestValidate_PositiveConstraints(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected error containing %q, got nil", tt.wantErr)
 			}
-			if !contains(err.Error(), tt.wantErr) {
+			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("error = %q, want to contain %q", err.Error(), tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidate_AllowedOrigins(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Database.DSN = "postgres://localhost/aether"
+	cfg.Auth.JWTSigningKey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	// "*" is valid
+	cfg.WebSocket.AllowedOrigins = []string{"*"}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("expected '*' to be valid, got %v", err)
+	}
+
+	// "https://example.com" is valid
+	cfg.WebSocket.AllowedOrigins = []string{"https://example.com"}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("expected https origin to be valid, got %v", err)
+	}
+
+	// "http://localhost:3000" is valid
+	cfg.WebSocket.AllowedOrigins = []string{"http://localhost:3000"}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("expected http origin to be valid, got %v", err)
+	}
+
+	// invalid scheme
+	cfg.WebSocket.AllowedOrigins = []string{"ftp://bad.com"}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for invalid origin scheme")
 	}
 }
 
@@ -265,6 +365,7 @@ func TestValidate_RetentionRules(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Database.DSN = "postgres://localhost/aether"
 	cfg.Auth.JWTSigningKey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 	cfg.Retention.Rules = []RetentionRule{
 		{Pattern: "", TTL: 24 * time.Hour, MaxCount: 100},
 	}
@@ -285,6 +386,30 @@ func TestValidate_RetentionRules(t *testing.T) {
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for zero max_count")
 	}
+
+	// invalid pattern: bare "*"
+	cfg.Retention.Rules = []RetentionRule{
+		{Pattern: "*", TTL: 24 * time.Hour, MaxCount: 100},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for bare * pattern")
+	}
+
+	// invalid pattern: not a valid channel name
+	cfg.Retention.Rules = []RetentionRule{
+		{Pattern: "has space.*", TTL: 24 * time.Hour, MaxCount: 100},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for invalid prefix in pattern")
+	}
+
+	// valid pattern
+	cfg.Retention.Rules = []RetentionRule{
+		{Pattern: "alerts.*", TTL: 24 * time.Hour, MaxCount: 5000},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid rule, got %v", err)
+	}
 }
 
 func TestChannelNameRegex(t *testing.T) {
@@ -295,7 +420,7 @@ func TestChannelNameRegex(t *testing.T) {
 		"iot.temp-sensor_01",
 		"a/b-c_d",
 		"alerts",
-		stringsRepeat("a", 128),
+		strings.Repeat("a", 128),
 	}
 	for _, name := range valid {
 		if !ChannelNameRegex.MatchString(name) {
@@ -310,7 +435,7 @@ func TestChannelNameRegex(t *testing.T) {
 		"double..dot",
 		"has space",
 		"has*star",
-		stringsRepeat("a", 129),
+		strings.Repeat("a", 129),
 		"has中文",
 	}
 	for _, name := range invalid {
@@ -323,8 +448,8 @@ func TestChannelNameRegex(t *testing.T) {
 func TestMatchRetentionRule(t *testing.T) {
 	cfg := &Config{
 		Retention: RetentionConfig{
-			DefaultTTL:      720 * time.Hour,
-			DefaultMaxCount: 10000,
+			DefaultTTL:       720 * time.Hour,
+			DefaultMaxCount:  10000,
 			Rules: []RetentionRule{
 				{Pattern: "alerts.*", TTL: 24 * time.Hour, MaxCount: 5000},
 				{Pattern: "orders.*", TTL: 2160 * time.Hour, MaxCount: 50000},
@@ -334,9 +459,9 @@ func TestMatchRetentionRule(t *testing.T) {
 	}
 
 	tests := []struct {
-		channel  string
-		wantTTL  time.Duration
-		wantMax  int
+		channel string
+		wantTTL time.Duration
+		wantMax int
 	}{
 		{"alerts.critical", 24 * time.Hour, 5000},
 		{"alerts.nested.deep", 24 * time.Hour, 5000},
@@ -344,7 +469,7 @@ func TestMatchRetentionRule(t *testing.T) {
 		{"iot.temp", 168 * time.Hour, 100000},
 		{"iot.nested.sensor", 168 * time.Hour, 100000},
 		{"unknown.channel", 720 * time.Hour, 10000},
-		{"alerting", 720 * time.Hour, 10000}, // not matching "alerts.*"
+		{"alerting", 720 * time.Hour, 10000},
 	}
 
 	for _, tt := range tests {
@@ -371,7 +496,7 @@ auth:
   jwt_signing_key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   jwt_clock_skew: 1m
   api_keys:
-    - key: "test-key-123"
+    - key: "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY"
       description: "test"
 websocket:
   ping_interval: 15s
@@ -409,7 +534,7 @@ log:
 	if cfg.Auth.JWTSigningKey != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
 		t.Errorf("Auth.JWTSigningKey not loaded")
 	}
-	if len(cfg.Auth.APIKeys) != 1 || cfg.Auth.APIKeys[0].Key != "test-key-123" {
+	if len(cfg.Auth.APIKeys) != 1 || cfg.Auth.APIKeys[0].Key != "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY" {
 		t.Errorf("Auth.APIKeys not loaded correctly")
 	}
 	if cfg.WebSocket.PingInterval != 15*time.Second {
@@ -427,41 +552,4 @@ log:
 	if cfg.Log.Format != "text" {
 		t.Errorf("Log.Format = %q", cfg.Log.Format)
 	}
-}
-
-// helpers
-
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||
-		(len(s) > 0 && len(sub) > 0 && findSubstring(s, sub)))
-}
-
-func findSubstring(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}
-
-func stringsToYAML(s string) string {
-	result := make([]byte, 0, len(s))
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\\' && i+1 < len(s) && s[i+1] == 'n' {
-			result = append(result, '\n')
-			i++
-		} else {
-			result = append(result, s[i])
-		}
-	}
-	return string(result)
-}
-
-func stringsRepeat(s string, n int) string {
-	result := make([]byte, 0, len(s)*n)
-	for i := 0; i < n; i++ {
-		result = append(result, s...)
-	}
-	return string(result)
 }
