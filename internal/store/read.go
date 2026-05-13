@@ -11,6 +11,10 @@ const maxHistoryLimit = 1000
 // ordered by seq_id ascending. Limit is capped at 1000.
 // If the channel does not exist, returns an empty slice (not an error).
 func (s *pgStore) ReadHistory(ctx context.Context, channel string, afterSeq int64, limit int) (*HistoryResult, error) {
+	if err := ValidateChannelName(channel); err != nil {
+		return nil, err
+	}
+
 	if limit <= 0 || limit > maxHistoryLimit {
 		limit = maxHistoryLimit
 	}
@@ -39,15 +43,15 @@ func (s *pgStore) ReadHistory(ctx context.Context, channel string, afterSeq int6
 		return nil, fmt.Errorf("iterate history: %w", err)
 	}
 
-	// Compute MinSeq for gap detection.
-	if len(result.Messages) > 0 {
-		err = s.pool.QueryRow(ctx,
-			`SELECT COALESCE(MIN(seq_id), 0) FROM messages WHERE channel = $1`,
-			channel,
-		).Scan(&result.MinSeq)
-		if err != nil {
-			return nil, fmt.Errorf("query min_seq: %w", err)
-		}
+	// MinSeq reflects the earliest available seq_id in the channel.
+	// Always computed so Hub can perform gap detection even when no messages
+	// are returned (e.g. afterSeq exceeds the channel's max seq_id).
+	err = s.pool.QueryRow(ctx,
+		`SELECT COALESCE(MIN(seq_id), 0) FROM messages WHERE channel = $1`,
+		channel,
+	).Scan(&result.MinSeq)
+	if err != nil {
+		return nil, fmt.Errorf("query min_seq: %w", err)
 	}
 
 	return result, nil

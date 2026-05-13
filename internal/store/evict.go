@@ -35,6 +35,10 @@ func (s *pgStore) EvictExpiredMessages(ctx context.Context) (int, int, error) {
 	totalCleaned := 0
 
 	for _, ch := range channels {
+		if err := ctx.Err(); err != nil {
+			return totalCleaned, totalEvicted, fmt.Errorf("eviction cancelled: %w", err)
+		}
+
 		ttl, maxCount := s.ruleMatch(ch.Name)
 
 		// TTL eviction.

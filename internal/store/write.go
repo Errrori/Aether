@@ -13,6 +13,10 @@ import (
 // If idempotencyKey is non-nil and a message with the same (channel, idempotencyKey) already exists,
 // the original seq_id and timestamp are returned without re-writing.
 func (s *pgStore) WriteMessage(ctx context.Context, channel string, payload json.RawMessage, idempotencyKey *string) (int64, time.Time, error) {
+	if err := ValidateChannelName(channel); err != nil {
+		return 0, time.Time{}, err
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, time.Time{}, fmt.Errorf("begin transaction: %w", err)

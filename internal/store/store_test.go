@@ -44,23 +44,25 @@ func newTestStore(t *testing.T) *pgStore {
 		},
 	}
 
-	s, err := New(ctx, dbCfg, retCfg)
+	st, err := New(ctx, dbCfg, retCfg)
 	if err != nil {
 		t.Fatalf("connect to test db: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { st.Close() })
 
-	if err := s.RunMigrations(ctx); err != nil {
+	if err := st.RunMigrations(ctx); err != nil {
 		t.Fatalf("run migrations: %v", err)
 	}
 
-	return s
+	return st.(*pgStore)
 }
 
 func truncateAll(t *testing.T, s *pgStore) {
 	t.Helper()
 	ctx := context.Background()
-	s.pool.Exec(ctx, `TRUNCATE messages, channels RESTART IDENTITY CASCADE`)
+	if _, err := s.pool.Exec(ctx, `TRUNCATE messages, channels RESTART IDENTITY CASCADE`); err != nil {
+		t.Fatalf("truncate test tables: %v", err)
+	}
 }
 
 // --- S-1: RunMigrations creates all tables and indexes ---
