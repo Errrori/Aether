@@ -86,12 +86,14 @@ func TestLoad_MissingRequiredFields(t *testing.T) {
 		name    string
 		yaml    string
 		wantErr string
+		clearEnv []string
 	}{
 		{
-			name: "missing dsn",
+			name:   "missing dsn",
 			yaml: `auth:
   jwt_signing_key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`,
 			wantErr: "database.dsn is required",
+			clearEnv: []string{"AETHER_DATABASE_DSN"},
 		},
 		{
 			name: "missing jwt_signing_key",
@@ -111,6 +113,9 @@ auth:
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			for _, key := range tt.clearEnv {
+				t.Setenv(key, "")
+			}
 			path := writeTestConfig(t, tt.yaml)
 			_, err := Load(path)
 			if err == nil {
