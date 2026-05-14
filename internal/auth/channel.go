@@ -12,6 +12,9 @@ func (s *authService) IsChannelAuthorized(claims *Claims, channel string) bool {
 			return true
 		case strings.HasSuffix(pattern, ".*"):
 			prefix := strings.TrimSuffix(pattern, ".*")
+			if prefix == "" {
+				continue
+			}
 			if strings.HasPrefix(channel, prefix+".") {
 				return true
 			}

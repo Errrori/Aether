@@ -22,6 +22,7 @@ func (s *authService) ParseAndValidateToken(tokenString string) (*Claims, error)
 		if errors.Is(err, jwt.ErrTokenExpired) {
 			return nil, fmt.Errorf("token expired: %w", ErrTokenExpired)
 		}
+		// 使用 %v 而非 %w 包装 JWT 库内部错误，隐藏库实现细节
 		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
 	}
 

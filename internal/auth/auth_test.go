@@ -111,6 +111,7 @@ func TestValidateAPIKey(t *testing.T) {
 		{"invalid key", "invalid_key_that_does_not_match_anything_XXXX", false},
 		{"empty key", "", false},
 		{"wrong case", "ywjjzgvmz2hpamtsbw5vchfyc3r1dnd4exoxmjm0nty", false},
+		{"same length invalid", strings.Repeat("a", 44), false},
 	}
 
 	for _, tt := range tests {
@@ -286,7 +287,8 @@ func TestIsChannelAuthorized(t *testing.T) {
 		{"mixed patterns match", &Claims{Channels: []string{"admin", "user.*"}}, "user.1234", true},
 		{"mixed patterns no match", &Claims{Channels: []string{"admin", "system.*"}}, "user.1234", false},
 		{"multiple wildcards match", &Claims{Channels: []string{"a.*", "b.*"}}, "b.child", true},
-		{"nil claims", nil, "anything", false},
+		{"wildcard bare dot", &Claims{Channels: []string{".*"}}, "anything", false},
+			{"nil claims", nil, "anything", false},
 		{"empty channels", &Claims{Channels: []string{}}, "anything", false},
 	}
 
@@ -319,6 +321,20 @@ func TestParseAndValidateToken_ClaimsExtraction(t *testing.T) {
 	}
 	if claims.Channels[0] != "order.*" || claims.Channels[1] != "system.alerts" {
 		t.Errorf("Channels = %v, want [order.*, system.alerts]", claims.Channels)
+	}
+}
+
+func TestParseAndValidateToken_MissingSub(t *testing.T) {
+	a := newTestAuth(t)
+	key := strings.Repeat("a", 32)
+	token := generateToken(t, key, "", []string{"ch1"}, time.Now().Add(time.Hour))
+
+	claims, err := a.ParseAndValidateToken(token)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if claims.Subject != "" {
+		t.Errorf("Subject = %q, want empty", claims.Subject)
 	}
 }
 
