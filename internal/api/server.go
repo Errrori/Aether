@@ -8,6 +8,7 @@ import (
 	"github.com/aether-mq/aether/internal/auth"
 	"github.com/aether-mq/aether/internal/hub"
 	"github.com/aether-mq/aether/internal/store"
+	"github.com/aether-mq/aether/internal/ws"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -16,23 +17,25 @@ type ServerConfig struct {
 }
 
 type Server struct {
-	hub   hub.Hub
-	auth  auth.Auth
-	store store.Store
-	cfg   ServerConfig
-	ready atomic.Bool
-	srv   *http.Server
+	hub       hub.Hub
+	auth      auth.Auth
+	store     store.Store
+	wsManager *ws.Manager
+	cfg       ServerConfig
+	ready     atomic.Bool
+	srv       *http.Server
 }
 
-func New(h hub.Hub, a auth.Auth, s store.Store, cfg ServerConfig) *Server {
+func New(h hub.Hub, a auth.Auth, s store.Store, wsm *ws.Manager, cfg ServerConfig) *Server {
 	if cfg.MaxPayloadSize <= 0 {
 		cfg.MaxPayloadSize = 65536
 	}
 	return &Server{
-		hub:   h,
-		auth:  a,
-		store: s,
-		cfg:   cfg,
+		hub:       h,
+		auth:      a,
+		store:     s,
+		wsManager: wsm,
+		cfg:       cfg,
 	}
 }
 
@@ -44,6 +47,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("GET /metricsz", promhttp.Handler().ServeHTTP)
+	if s.wsManager != nil {
+		mux.Handle("GET /ws", s.wsManager)
+	}
 
 	return mux
 }
@@ -57,6 +63,11 @@ func (s *Server) ListenAndServe(addr string) error {
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.ready.Store(false)
+	if s.wsManager != nil {
+		if err := s.wsManager.Shutdown(ctx); err != nil {
+			return err
+		}
+	}
 	if s.srv != nil {
 		return s.srv.Shutdown(ctx)
 	}

@@ -112,7 +112,7 @@ func newTestServer(t *testing.T) (*Server, *mockHub, *mockAuth, *mockStore) {
 	a := newMockAuth()
 	s := newMockStore()
 	cfg := ServerConfig{MaxPayloadSize: 65536}
-	server := New(h, a, s, cfg)
+	server := New(h, a, s, nil, cfg)
 	return server, h, a, s
 }
 
