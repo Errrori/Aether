@@ -9,6 +9,7 @@ import (
 )
 
 func (h *hubImpl) Publish(ctx context.Context, channel string, payload json.RawMessage, idempotencyKey *string) (int64, time.Time, error) {
+	start := time.Now()
 	if err := store.ValidateChannelName(channel); err != nil {
 		return 0, time.Time{}, err
 	}
@@ -28,6 +29,12 @@ func (h *hubImpl) Publish(ctx context.Context, channel string, payload json.RawM
 	msgBytes, err := MarshalFrame(frame)
 	if err != nil {
 		// Persisted successfully but couldn't marshal — don't fail the publish.
+		if h.metrics.IncMessagesPublished != nil {
+			h.metrics.IncMessagesPublished(channel)
+		}
+		if h.metrics.ObservePublish != nil {
+			h.metrics.ObservePublish(channel, time.Since(start).Seconds())
+		}
 		return seqID, timestamp, nil
 	}
 
@@ -54,6 +61,9 @@ func (h *hubImpl) Publish(ctx context.Context, channel string, payload json.RawM
 	}
 	if h.metrics.AddMessagesPushed != nil && pushed > 0 {
 		h.metrics.AddMessagesPushed(channel, pushed)
+	}
+	if h.metrics.ObservePublish != nil {
+		h.metrics.ObservePublish(channel, time.Since(start).Seconds())
 	}
 
 	return seqID, timestamp, nil

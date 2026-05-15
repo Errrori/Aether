@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -62,7 +63,8 @@ func (m *mockStore) ReadHistory(ctx context.Context, channel string, afterSeq in
 	}
 	msgs, ok := m.messages[channel]
 	if !ok || len(msgs) == 0 {
-		return &store.HistoryResult{Messages: nil, MinSeq: 1}, nil
+		// Match real store behavior: COALESCE(MIN(seq_id), 0) → MinSeq = 0.
+		return &store.HistoryResult{Messages: nil, MinSeq: 0}, nil
 	}
 	minSeq := msgs[0].SeqID
 	var result []store.Message
@@ -185,17 +187,17 @@ func TestHub_Publish_StoreErrorReturnsError(t *testing.T) {
 func TestHub_ConcurrentPublishAndSubscribe(t *testing.T) {
 	h, _ := newTestHub(t)
 
-	var wg sync.WaitGroup
+	// Pre-subscribe connections from the main goroutine so t.Fatal is never
+	// called from a child goroutine.
+	conns := make([]*Connection, 20)
 	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func(n int) {
-			defer wg.Done()
-			conn := newTestConnection(t, "c"+string(rune('0'+n)))
-			h.Subscribe(conn, []string{"ch"}, nil)
-			drainFrame(t, conn)
-		}(i)
+		conns[i] = newTestConnection(t, fmt.Sprintf("c%d", i))
+		h.Subscribe(conns[i], []string{"ch"}, nil)
+		drainFrame(t, conns[i]) // consume subscribed ack
 	}
 
+	// Concurrently publish from many goroutines.
+	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
 		go func() {
@@ -249,7 +251,7 @@ func TestHub_Subscribe_DuplicateIsIgnored(t *testing.T) {
 // --- H-7: after_seq replays history before registering for real-time ---
 
 func TestHub_Subscribe_HistoryBeforeRealTime(t *testing.T) {
-	h, store := newTestHub(t)
+	h, _ := newTestHub(t)
 
 	// Pre-populate history via Publish.
 	h.Publish(context.Background(), "ch", json.RawMessage(`"h1"`), nil)
@@ -281,8 +283,6 @@ func TestHub_Subscribe_HistoryBeforeRealTime(t *testing.T) {
 	if !strings.Contains(string(f4), `"rt"`) {
 		t.Errorf("expected real-time msg, got %s", string(f4))
 	}
-
-	_ = store
 }
 
 // --- H-8, H-9: Gap detection when after_seq < minSeq - 1 ---
@@ -290,21 +290,12 @@ func TestHub_Subscribe_HistoryBeforeRealTime(t *testing.T) {
 func TestHub_Subscribe_GapDetection(t *testing.T) {
 	h, _ := newTestHub(t)
 
-	// Publish messages at seq 1,2,3.
+	// Publish messages at seq 1,2,3. minSeq=1. afterSeq=-1 → -1 < 0 → gap.
 	h.Publish(context.Background(), "ch", json.RawMessage(`"m1"`), nil)
 	h.Publish(context.Background(), "ch", json.RawMessage(`"m2"`), nil)
 	h.Publish(context.Background(), "ch", json.RawMessage(`"m3"`), nil)
 
 	conn := newTestConnection(t, "c1")
-	// Request after_seq = 3 (no gap — already have the latest three messages
-	// but let's test with after_seq=0 and minSeq=1).
-	// Actually, minSeq is 1. If after_seq < 0 (which is -1 for minSeq-1=0), gap triggers.
-	// Let's first evict some messages to create a gap. But mockStore doesn't evict.
-	// Instead, test the gap formula: afterSeq < minSeq - 1.
-	// minSeq=1, so afterSeq < 0 triggers gap. Test with afterSeq = -1 (which means
-	// "from the beginning" in normal cases).
-	//
-	// Real scenario: messages 1-3 exist. minSeq=1. afterSeq=-1 → -1 < 0 → gap.
 	h.Subscribe(conn, []string{"ch"}, map[string]int64{"ch": -1})
 
 	// First frame should be a gap frame.
@@ -322,7 +313,7 @@ func TestHub_Subscribe_TooManyPerRequest(t *testing.T) {
 
 	channels := make([]string, 101)
 	for i := range channels {
-		channels[i] = "ch" + string(rune('0'+i%10))
+		channels[i] = fmt.Sprintf("ch%d", i)
 	}
 	h.Subscribe(conn, channels, nil)
 
@@ -330,19 +321,6 @@ func TestHub_Subscribe_TooManyPerRequest(t *testing.T) {
 	if !strings.Contains(string(data), "40005") {
 		t.Errorf("expected error code 40005, got %s", string(data))
 	}
-}
-
-func TestHub_Subscribe_TooManyTotal(t *testing.T) {
-	h, _ := newTestHub(t)
-	conn := newTestConnection(t, "c1")
-
-	// First subscribe: 2 channels.
-	h.Subscribe(conn, []string{"a", "b"}, nil)
-	drainFrame(t, conn)
-
-	// Artificially set channel count to 999 so next subscribe exceeds 1000.
-	conn.AddChannel("x") // dummy to push count
-	// Actually, just create a hub with a low limit for this test.
 }
 
 func TestHub_Subscribe_TotalLimitExceeded(t *testing.T) {
@@ -451,7 +429,6 @@ func TestHub_Publish_NoSubscribers(t *testing.T) {
 	if seqID != 1 {
 		t.Errorf("expected seq 1, got %d", seqID)
 	}
-	// No subscribers → no frames to send. Just shouldn't crash.
 }
 
 // --- Subscribe with invalid channel name ---

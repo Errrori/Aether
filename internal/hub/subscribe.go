@@ -101,10 +101,8 @@ func (h *hubImpl) Subscribe(conn *Connection, channels []string, afterSeq map[st
 		}
 		h.channels[ch][conn.ID] = conn
 		conn.AddChannel(ch)
-
-		if seq, ok := afterSeq[ch]; ok && seq >= 0 {
-			conn.SetCursor(ch, seq)
-		}
+		// Cursor is set by replayHistory for channels with afterSeq;
+		// for channels without afterSeq it remains at the zero value.
 	}
 	h.mu.Unlock()
 
@@ -146,6 +144,11 @@ func (h *hubImpl) replayHistory(conn *Connection, channel string, afterSeq int64
 		}
 		data, err := MarshalFrame(frame)
 		if err != nil {
+			// MarshalFrame failure for a message is non-recoverable:
+			// update maxSeq anyway so the cursor does not lie about delivery.
+			if msg.SeqID > maxSeq {
+				maxSeq = msg.SeqID
+			}
 			continue
 		}
 		select {
@@ -192,6 +195,11 @@ func (h *hubImpl) Unsubscribe(conn *Connection, channels []string) {
 }
 
 func (h *hubImpl) RemoveConnection(conn *Connection) {
+	// Close the connection first so that Done() signals before cleanup.
+	// This prevents a concurrent Subscribe from registering a connection
+	// that is being torn down (TOCTOU between h.mu.Unlock and conn.Close).
+	conn.Close()
+
 	h.mu.Lock()
 	// Sweep all channels for this connection to avoid TOCTOU races with Subscribe.
 	for ch, subs := range h.channels {
@@ -214,18 +222,19 @@ func (h *hubImpl) RemoveConnection(conn *Connection) {
 	if h.metrics.DecConnections != nil {
 		h.metrics.DecConnections()
 	}
-
-	conn.Close()
 }
 
 // --- helpers for sending frames to a connection ---
 
 func (h *hubImpl) sendError(conn *Connection, code int, message string) {
-	data, _ := MarshalFrame(ErrorFrame{
+	data, err := MarshalFrame(ErrorFrame{
 		Type:    FrameTypeError,
 		Code:    code,
 		Message: message,
 	})
+	if err != nil {
+		return
+	}
 	select {
 	case conn.Send <- data:
 	default:
@@ -234,10 +243,13 @@ func (h *hubImpl) sendError(conn *Connection, code int, message string) {
 }
 
 func (h *hubImpl) sendSubscribed(conn *Connection, channels []string) {
-	data, _ := MarshalFrame(SubscribedFrame{
+	data, err := MarshalFrame(SubscribedFrame{
 		Type:     FrameTypeSubscribed,
 		Channels: channels,
 	})
+	if err != nil {
+		return
+	}
 	select {
 	case conn.Send <- data:
 	default:
@@ -246,10 +258,13 @@ func (h *hubImpl) sendSubscribed(conn *Connection, channels []string) {
 }
 
 func (h *hubImpl) sendUnsubscribed(conn *Connection, channels []string) {
-	data, _ := MarshalFrame(UnsubscribedFrame{
+	data, err := MarshalFrame(UnsubscribedFrame{
 		Type:     FrameTypeUnsubscribed,
 		Channels: channels,
 	})
+	if err != nil {
+		return
+	}
 	select {
 	case conn.Send <- data:
 	default:
@@ -258,7 +273,7 @@ func (h *hubImpl) sendUnsubscribed(conn *Connection, channels []string) {
 }
 
 func (h *hubImpl) sendGap(conn *Connection, channel string, requestedSeq, availableFrom int64) {
-	data, _ := MarshalFrame(GapFrame{
+	data, err := MarshalFrame(GapFrame{
 		Type:             FrameTypeGap,
 		Channel:          channel,
 		AvailableFromSeq: availableFrom,
@@ -266,6 +281,9 @@ func (h *hubImpl) sendGap(conn *Connection, channel string, requestedSeq, availa
 		Message: fmt.Sprintf("gap: requested seq %d but earliest available is %d",
 			requestedSeq, availableFrom),
 	})
+	if err != nil {
+		return
+	}
 	select {
 	case conn.Send <- data:
 	default:
