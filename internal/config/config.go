@@ -28,9 +28,10 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Addr    string `yaml:"addr"`
-	TLSCert string `yaml:"tls_cert"`
-	TLSKey  string `yaml:"tls_key"`
+	Addr           string `yaml:"addr"`
+	TLSCert        string `yaml:"tls_cert"`
+	TLSKey         string `yaml:"tls_key"`
+	MaxPayloadSize int    `yaml:"max_payload_size"`
 }
 
 type DatabaseConfig struct {
@@ -85,7 +86,8 @@ type LogConfig struct {
 func defaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Addr: ":8080",
+			Addr:           ":8080",
+			MaxPayloadSize: 65536,
 		},
 		Database: DatabaseConfig{
 			MaxOpenConns:    25,
@@ -154,6 +156,7 @@ func applyEnvOverrides(cfg *Config) error {
 		{"AETHER_SERVER_ADDR", &cfg.Server.Addr, "string"},
 		{"AETHER_SERVER_TLS_CERT", &cfg.Server.TLSCert, "string"},
 		{"AETHER_SERVER_TLS_KEY", &cfg.Server.TLSKey, "string"},
+		{"AETHER_SERVER_MAX_PAYLOAD_SIZE", &cfg.Server.MaxPayloadSize, "int"},
 		// database
 		{"AETHER_DATABASE_DSN", &cfg.Database.DSN, "string"},
 		{"AETHER_DATABASE_MAX_OPEN_CONNS", &cfg.Database.MaxOpenConns, "int"},
@@ -281,6 +284,10 @@ func (c *Config) Validate() error {
 
 	if c.Shutdown.Timeout <= 0 {
 		return fmt.Errorf("shutdown.timeout must be positive")
+	}
+
+	if c.Server.MaxPayloadSize <= 0 {
+		return fmt.Errorf("server.max_payload_size must be positive")
 	}
 
 	if c.Server.TLSCert != "" && c.Server.TLSKey == "" {
