@@ -377,6 +377,25 @@ func TestHistory_ChannelNotFound(t *testing.T) {
 	}
 }
 
+func TestHistory_StorageFailure(t *testing.T) {
+	server, _, _, s := newTestServer(t)
+	s.historyErr = fmt.Errorf("postgresql not available")
+
+	resp := doRequest(t, server, "GET", "/api/v1/history?channel=test", nil, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", resp.StatusCode)
+	}
+
+	json := readJSON(t, resp)
+	errObj := json["error"].(map[string]any)
+	if errObj["code"] != float64(ErrCodeStorageFailure) {
+		t.Fatalf("expected error code %d, got %v", ErrCodeStorageFailure, errObj["code"])
+	}
+}
+
 func TestHistory_MissingChannel(t *testing.T) {
 	server, _, _, _ := newTestServer(t)
 
@@ -622,18 +641,7 @@ func TestErrorResponseFormat(t *testing.T) {
 	}
 }
 
-// --- tests: ListenAndServe and Shutdown ---
-
-func TestListenAndServe_ReadyState(t *testing.T) {
-	server, _, _, _ := newTestServer(t)
-	// ListenAndServe sets ready to true
-	if server.ready.Load() {
-		t.Fatal("expected not ready before ListenAndServe")
-	}
-
-	// We can't fully start the server in a unit test, but we can check
-	// that the method sets up the http.Server correctly
-}
+// --- tests: Shutdown ---
 
 func TestShutdown_ReadyState(t *testing.T) {
 	server, _, _, _ := newTestServer(t)

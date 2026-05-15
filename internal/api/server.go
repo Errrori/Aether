@@ -49,9 +49,9 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) ListenAndServe(addr string) error {
+	s.srv = &http.Server{Addr: addr, Handler: s.Handler()}
 	s.ready.Store(true)
 	defer s.ready.Store(false)
-	s.srv = &http.Server{Addr: addr, Handler: s.Handler()}
 	return s.srv.ListenAndServe()
 }
 

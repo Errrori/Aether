@@ -53,7 +53,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.store.ReadHistory(r.Context(), channel, afterSeq, limit)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidJSON, err.Error())
+		writeError(w, http.StatusServiceUnavailable, ErrCodeStorageFailure, "failed to read history")
 		return
 	}
 
