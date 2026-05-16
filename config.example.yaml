@@ -1,0 +1,60 @@
+# Aether 配置文件示例
+# 复制为 config.yaml 并修改必填项即可使用
+
+# ---- 服务监听 ----
+server:
+  addr: ":8080"                   # 监听地址（默认 :8080）
+  # tls_cert: "/path/to/cert.pem" # TLS 证书路径（空则不启用 TLS）
+  # tls_key: "/path/to/key.pem"   # TLS 密钥路径（空则不启用 TLS）
+  max_payload_size: 65536         # 消息 payload 最大字节数（默认 64KB）
+
+# ---- 数据库连接（PostgreSQL）----
+database:
+  dsn: "postgres://aether:aether@localhost:5432/aether?sslmode=disable"
+  max_open_conns: 25              # 最大打开连接数
+  max_idle_conns: 10              # 最大空闲连接数
+  conn_max_idle_time: 5m          # 连接最大空闲时间
+  conn_max_lifetime: 30m          # 连接最大存活时间
+
+# ---- 认证 ----
+auth:
+  jwt_signing_key: "change-me-minimum-32-bytes-long!!"  # HS256 签名密钥（必填，至少 32 字节）
+  jwt_clock_skew: 30s                                    # JWT 过期时钟偏移容忍（默认 30s）
+  api_keys:                                              # API Key 列表（v1 静态配置）
+    - key: "CHANGE_ME_qQd1MstPHPasBNbMq9FqPLhUQ3LrR7G4X"
+      description: "默认发布 Key — 修改为安全随机字符串（至少 43 字符）"
+
+# ---- WebSocket ----
+websocket:
+  ping_interval: 30s               # ping 发送间隔（默认 30s）
+  pong_timeout: 60s                # 无 pong 响应断连时间，须 >= ping_interval
+  outbound_buffer: 256             # 每连接出站消息缓冲区上限
+  max_message_size: 65536          # 入站帧最大字节数（默认 64KB）
+  allowed_origins: []              # 允许的 WebSocket 源（空列表 = 拒绝所有跨源）
+                                   # 开发用：["*"] 接受任意源
+                                   # 生产用：["https://app.example.com"]
+
+# ---- 消息留存策略 ----
+retention:
+  default_ttl: 720h                # 默认消息存活时间（720h = 30 天）
+  default_max_count: 10000         # 每频道默认最大消息数
+  eviction_interval: 5m            # 清理任务执行间隔（默认 5m）
+  rules:                           # 按频道前缀匹配，命中第一条即生效
+    - pattern: "alerts.*"
+      ttl: 24h
+      max_count: 5000
+    - pattern: "orders.*"
+      ttl: 2160h                   # 90 天
+      max_count: 50000
+    - pattern: "volatile.*"
+      ttl: 1h
+      max_count: 1000
+
+# ---- 优雅关闭 ----
+shutdown:
+  timeout: 10s                     # 关闭超时，超时后强制断开剩余连接
+
+# ---- 日志 ----
+log:
+  level: "info"                    # debug / info / warn / error
+  format: "json"                   # json / text

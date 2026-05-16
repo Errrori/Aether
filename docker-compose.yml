@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aether
+      POSTGRES_PASSWORD: aether
+      POSTGRES_DB: aether
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aether -d aether"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - aether-net
+
+  aether:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.example.yaml:/etc/aether/config.yaml:ro
+    environment:
+      AETHER_DATABASE_DSN: "postgres://aether:aether@postgres:5432/aether?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - aether-net
+
+volumes:
+  pgdata:
+
+networks:
+  aether-net:
+    driver: bridge
