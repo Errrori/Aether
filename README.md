@@ -4,15 +4,11 @@
 [![CI](https://github.com/Errrori/Aether/actions/workflows/test.yml/badge.svg)](https://github.com/Errrori/Aether/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> English | [中文](#aether--轻量级实时消息推送中间件)
-
-Aether is a lightweight real-time message push middleware. **Publish via HTTP, subscribe via WebSocket, persist with PostgreSQL.** Strict pub-sub model — publishers and subscribers are fully decoupled, routed by channel name.
+**English:** Aether is a lightweight real-time message push middleware. **Publish via HTTP, subscribe via WebSocket, persist with PostgreSQL.** Strict pub-sub model — publishers and subscribers are fully decoupled, routed by channel name.
 
 ---
 
-**中文简介**
-
-Aether 是一个轻量级的实时消息推送中间件。发布者通过 HTTP API 将消息推送到指定频道，Aether 将每条消息实时推送给所有通过 WebSocket 订阅该频道的客户端。严格遵循发布-订阅模型，发布者和订阅者完全解耦，通过频道名称作为唯一路由键。
+**中文：** Aether 是一个轻量级的实时消息推送中间件。发布者通过 HTTP API 将消息推送到指定频道，Aether 将每条消息实时推送给所有通过 WebSocket 订阅该频道的客户端。严格遵循发布-订阅模型，发布者和订阅者完全解耦，通过频道名称作为唯一路由键。
 
 设计原则：
 - **严格单向推送** — 普通客户端只能接收消息，发布权限仅限持有 API Key 的消息源
