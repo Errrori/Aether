@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"sync/atomic"
 
@@ -65,7 +66,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.ready.Store(false)
 	if s.wsManager != nil {
 		if err := s.wsManager.Shutdown(ctx); err != nil {
-			return err
+			slog.Default().Warn("ws shutdown incomplete", "err", err)
 		}
 	}
 	if s.srv != nil {

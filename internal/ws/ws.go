@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/aether-mq/aether/internal/auth"
 	"github.com/aether-mq/aether/internal/config"
@@ -50,7 +51,9 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "server shutting down", http.StatusServiceUnavailable)
 		return
 	}
+	m.wg.Add(1)
 	m.mu.Unlock()
+	defer m.wg.Done()
 
 	token := r.URL.Query().Get("token")
 	if token == "" {
@@ -88,9 +91,6 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		hubCnn: hubCnn,
 	}
 
-	m.wg.Add(1)
-	defer m.wg.Done()
-
 	m.mu.Lock()
 	m.conns[connID] = ac
 	m.mu.Unlock()
@@ -116,27 +116,35 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()
 	m.draining = true
-	snapshot := make([]*activeConn, 0, len(m.conns))
-	for _, ac := range m.conns {
-		snapshot = append(snapshot, ac)
-	}
 	m.mu.Unlock()
 
-	for _, ac := range snapshot {
-		ac.wsConn.Close(websocket.StatusGoingAway, "server shutting down")
-	}
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
 
-	done := make(chan struct{})
-	go func() {
-		m.wg.Wait()
-		close(done)
-	}()
+	for {
+		// Close any connections currently in the map. This runs in a loop
+		// because ServeHTTP may register new connections (that passed the
+		// draining check before it was set) in the time between the snapshot
+		// and these connections completing their upgrade.
+		m.mu.Lock()
+		for _, ac := range m.conns {
+			ac.wsConn.Close(websocket.StatusGoingAway, "server shutting down")
+		}
+		m.mu.Unlock()
 
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+		done := make(chan struct{})
+		go func() {
+			m.wg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			return nil
+		case <-ticker.C:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 }
 
