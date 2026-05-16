@@ -219,21 +219,27 @@ func TestParseAndValidateToken_Expiry(t *testing.T) {
 	key := strings.Repeat("a", 32)
 
 	tests := []struct {
-		name    string
-		exp     time.Time
-		wantErr error
+		name      string
+		expOffset time.Duration // offset from now for token expiration; 0 means no expiry, -1 means compute inside loop
+		wantErr   error
 	}{
-		{"valid unexpired", time.Now().Add(time.Hour), nil},
-		{"no expiry", time.Time{}, nil},
-		{"expired outside skew", time.Now().Add(-60 * time.Second), ErrTokenExpired},
-		{"expired within skew", time.Now().Add(-20 * time.Second), nil},
-		{"expired at skew boundary", time.Now().Add(-29 * time.Second), nil},
-		{"expired at skew boundary +1s", time.Now().Add(-35 * time.Second), ErrTokenExpired},
+		{"valid unexpired", time.Hour, nil},
+		{"no expiry", -1, nil},
+		{"expired outside skew", -60 * time.Second, ErrTokenExpired},
+		{"expired within skew", -20 * time.Second, nil},
+		{"expired at skew boundary", -29 * time.Second, nil},
+		{"expired at skew boundary +1s", -35 * time.Second, ErrTokenExpired},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			token := generateToken(t, key, "sub", nil, tt.exp)
+			var exp time.Time
+			if tt.expOffset == -1 {
+				exp = time.Time{} // no expiry
+			} else {
+				exp = time.Now().Add(tt.expOffset)
+			}
+			token := generateToken(t, key, "sub", nil, exp)
 			_, err := a.ParseAndValidateToken(token)
 			if tt.wantErr == nil {
 				if err != nil {
