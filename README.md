@@ -1,7 +1,7 @@
 # Aether — 轻量级实时消息推送中间件
 
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)](https://go.dev/)
-[![CI](https://github.com/aether-mq/aether/actions/workflows/test.yml/badge.svg)](https://github.com/aether-mq/aether/actions/workflows/test.yml)
+[![CI](https://github.com/Errrori/Aether/actions/workflows/test.yml/badge.svg)](https://github.com/Errrori/Aether/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 > English | [中文](#aether--轻量级实时消息推送中间件)
@@ -42,7 +42,7 @@ flowchart LR
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/aether-mq/aether.git
+git clone https://github.com/Errrori/Aether.git
 cd aether
 
 # 2. 编辑配置（修改 jwt_signing_key 和 api_keys）
@@ -63,11 +63,11 @@ curl http://localhost:8080/healthz
 
 ### 方式二：预编译二进制
 
-前往 [GitHub Releases](https://github.com/aether-mq/aether/releases) 下载对应平台的二进制文件。
+前往 [GitHub Releases](https://github.com/Errrori/Aether/releases) 下载对应平台的二进制文件。
 
 ```bash
 # Linux x86_64 示例
-wget https://github.com/aether-mq/aether/releases/latest/download/aether-linux-amd64
+wget https://github.com/Errrori/Aether/releases/latest/download/aether-linux-amd64
 chmod +x aether-linux-amd64
 ./aether-linux-amd64 -config config.yaml
 ```
@@ -75,7 +75,7 @@ chmod +x aether-linux-amd64
 ### 方式三：手动编译
 
 ```bash
-git clone https://github.com/aether-mq/aether.git
+git clone https://github.com/Errrori/Aether.git
 cd aether
 go build -o aether ./cmd/aether
 ./aether -config config.yaml
