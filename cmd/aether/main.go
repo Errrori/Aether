@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,14 +23,20 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	configPath := flag.String("config", "config.yaml", "path to configuration file")
 	flag.Parse()
 
 	// 1. Load configuration.
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "config load error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("config: %w", err)
 	}
 
 	// 2. Set up structured logging before any component initializes.
@@ -44,22 +51,19 @@ func main() {
 	slog.Info("connecting to database")
 	st, err := store.New(ctx, &cfg.Database, &cfg.Retention)
 	if err != nil {
-		slog.Error("database connection failed", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("database: %w", err)
 	}
 	defer st.Close()
 
 	slog.Info("running database migrations")
 	if err := st.RunMigrations(ctx); err != nil {
-		slog.Error("migrations failed", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("migrations: %w", err)
 	}
 
 	// 5. Auth.
 	au, err := auth.New(&cfg.Auth)
 	if err != nil {
-		slog.Error("auth init failed", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("auth: %w", err)
 	}
 	slog.Info("auth module ready")
 
@@ -89,7 +93,10 @@ func main() {
 	// 10. Background tasks: eviction loop.
 	evictCtx, evictCancel := context.WithCancel(context.Background())
 	defer evictCancel()
-	go runEvictionLoop(evictCtx, st, cfg.Retention.EvictionInterval)
+
+	var evictDone sync.WaitGroup
+	evictDone.Add(1)
+	go runEvictionLoop(evictCtx, st, cfg.Retention.EvictionInterval, &evictDone)
 
 	// 11. Start the HTTP server (blocks until shutdown).
 	if cfg.Server.TLSCert != "" {
@@ -106,6 +113,7 @@ func main() {
 
 	// 12. Shutdown sequence.
 	evictCancel()
+	evictDone.Wait()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.Shutdown.Timeout)
 	defer shutdownCancel()
@@ -115,6 +123,7 @@ func main() {
 		slog.Warn("graceful shutdown incomplete", "err", err)
 	}
 	slog.Info("shutdown complete")
+	return nil
 }
 
 func setupLogging(cfg config.LogConfig) {
@@ -139,7 +148,9 @@ func setupLogging(cfg config.LogConfig) {
 	slog.SetDefault(slog.New(h))
 }
 
-func runEvictionLoop(ctx context.Context, s store.Store, interval time.Duration) {
+func runEvictionLoop(ctx context.Context, s store.Store, interval time.Duration, done *sync.WaitGroup) {
+	defer done.Done()
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 

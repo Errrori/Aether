@@ -14,9 +14,13 @@ func (h *hubImpl) Publish(ctx context.Context, channel string, payload json.RawM
 		return 0, time.Time{}, err
 	}
 
+	writeStart := time.Now()
 	seqID, timestamp, err := h.store.WriteMessage(ctx, channel, payload, idempotencyKey)
 	if err != nil {
 		return 0, time.Time{}, err
+	}
+	if h.metrics.ObserveStorageWrite != nil {
+		h.metrics.ObserveStorageWrite(channel, time.Since(writeStart).Seconds())
 	}
 
 	frame := MessageFrame{
