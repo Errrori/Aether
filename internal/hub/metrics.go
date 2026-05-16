@@ -11,6 +11,7 @@ type Metrics struct {
 	IncMessagesPublished func(channel string)
 	AddMessagesPushed    func(channel string, n int)
 	ObservePublish       func(channel string, d float64)
+	ObserveStorageWrite  func(channel string, d float64)
 }
 
 // NopMetrics returns a zero-value Metrics that silently discards all metrics.

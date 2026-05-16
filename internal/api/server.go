@@ -62,6 +62,13 @@ func (s *Server) ListenAndServe(addr string) error {
 	return s.srv.ListenAndServe()
 }
 
+func (s *Server) ListenAndServeTLS(addr, certFile, keyFile string) error {
+	s.srv = &http.Server{Addr: addr, Handler: s.Handler()}
+	s.ready.Store(true)
+	defer s.ready.Store(false)
+	return s.srv.ListenAndServeTLS(certFile, keyFile)
+}
+
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.ready.Store(false)
 	if s.wsManager != nil {
