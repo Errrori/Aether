@@ -308,3 +308,159 @@ DELETE FROM channels WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.cha
 | Prometheus histogram | v1 使用默认桶，v2 根据实际延迟分布调整 | 先跑起来再优化 |
 | 集成测试 | 真实 PostgreSQL（Docker） | mock 无法验证 SQL 正确性 |
 | WebSocket close 代码 | 缓冲区满: 1012，优雅关闭: 1001，Token 无效: HTTP 401（非 WS close） | PRD 已定义 |
+
+## 7. v2 实现规格
+
+> v2 在 v1 单节点消息推送的基础上，增加动态 Key 管理、多消息源接入、集群扩展、多种消费方式和运维可见性。
+
+### 7.1 v2 实现顺序
+
+```
+第1层  地基       Key CRUD (FR-2.1)
+第2层  消息入口    Webhook (FR-2.5) + Batch Publish API (FR-2.4 拆分) + MQ 桥接设计文档
+第3层  保护       速率限制 (FR-2.8)
+第4层  扩展       集群模式 (FR-2.2) + Presence (FR-2.3)
+第5层  消费体验    SSE (FR-2.9) + 消息确认 (FR-2.6) + MQ 桥接实现
+第6层  运维可见    管理面板 (FR-2.7) + 批量操作 UI (FR-2.4 拆分)
+```
+
+依赖关系：
+- 第1层（Key CRUD）为所有后续层提供认证和权限基础设施
+- 第2层（消息入口）依赖第1层的 Key 管理来验证消息源身份
+- 第3层（速率限制）依赖第1层的 Key 标识作为限流维度
+- 第4层（集群模式）依赖第1层的 Key 模型可跨节点共享
+- MQ 桥接设计文档在第2层交付，实现在第5层：待第4层集群跑稳后，MQ Consumer 直接调用 hub.Publish，LISTEN/NOTIFY 透明生效
+- Batch Publish API 端点在第2层（消息入口），管理面板的批量操作 UI 在第6层
+
+### 7.2 第1层：动态 API Key CRUD
+
+#### 7.2.1 模块：`internal/keymgmt`
+
+新增模块，负责 API Key 的存储和生命周期管理。与 `internal/auth` 配合：auth 负责验证，keymgmt 负责管理。
+
+| # | 验收项 |
+|---|--------|
+| K-1 | `POST /api/v2/keys`：创建 Key，请求体 `{ "name": string, "publish": [string], "subscribe": [string], "admin": bool, "expires_in"?: string }`，返回完整 Key 明文（仅此一次）和元数据 |
+| K-2 | `GET /api/v2/keys`：列出所有 Key 的元数据（id、name、key_prefix、permissions、created_at、expires_at、revoked_at），不含 key_hash |
+| K-3 | `GET /api/v2/keys/{id}`：返回单个 Key 完整元数据 |
+| K-4 | `DELETE /api/v2/keys/{id}`：撤销 Key，设置 `revoked_at`，已撤销 Key 的后续请求拒绝 |
+| K-5 | `POST /api/v2/keys/{id}/rotate`：轮换 Key，生成新密钥并返回明文，旧密钥立即失效 |
+| K-6 | Key 明文格式：前缀 `aek_` + 32 字节加密随机数 Base64url 编码 = 47 字符，遵循 NFR-9 |
+| K-7 | 存储时仅保存 SHA-256 哈希，不保存明文。创建/轮换时返回明文后不可再次获取 |
+| K-8 | 创建 Key 时检查 name 唯一性，重复返回 409 |
+| K-9 | 管理端点认证：请求者必须持有 `admin: true` 的 Key，否则返回 40302 |
+| K-10 | 至少一个管理员 Key 存在：bootstrap 阶段从配置文件迁移已有 Key 到 `api_keys` 表，第一个 Key 标记为 admin |
+| K-11 | `auth.ValidateAPIKey` 改为查询 `api_keys` 表（通过 key_hash），结果缓存到内存（sync.Map），撤销/轮换时淘汰缓存 |
+| K-12 | `auth.ValidateAPIKey` 签名从 `bool` 升级为 `(KeyValidationResult, error)`，返回 Key ID 和权限集合供后续授权检查使用 |
+| K-13 | Key 的权限模型：`publish` 列表控制可发布频道（支持前缀通配符，复用 `prefix.*` 规则），`subscribe` 列表控制可订阅频道，`admin` 标志控制管理端点访问 |
+| K-14 | 配置文件中仍可定义静态 Key（向后兼容），启动时自动迁移到 `api_keys` 表（幂等：已存在则跳过） |
+
+#### 7.2.2 关键接口
+
+```go
+// KeyPermissions 定义 Key 的权限范围
+type KeyPermissions struct {
+    Publish   []string `json:"publish"`   // 可发布频道模式，空列表 = 禁止发布
+    Subscribe []string `json:"subscribe"` // 可订阅频道模式，空列表 = 禁止订阅
+    Admin     bool     `json:"admin"`     // 是否管理员
+}
+
+// KeyMeta 是 Key 的公开元数据（不含哈希和明文）
+type KeyMeta struct {
+    ID          string         `json:"id"`
+    Name        string         `json:"name"`
+    KeyPrefix   string         `json:"key_prefix"`   // "aek_xxxxxxxx" 用于识别
+    Permissions KeyPermissions `json:"permissions"`
+    CreatedAt   time.Time      `json:"created_at"`
+    ExpiresAt   *time.Time     `json:"expires_at,omitempty"`
+    RevokedAt   *time.Time     `json:"revoked_at,omitempty"`
+}
+
+// CreatedKey 是创建/轮换 Key 的返回值
+type CreatedKey struct {
+    Key  string  `json:"key"` // 完整明文，仅此一次
+    Meta KeyMeta `json:"meta"`
+}
+
+// KeyManager 管理 API Key 的生命周期
+type KeyManager interface {
+    CreateKey(ctx context.Context, name string, perms KeyPermissions, expiresIn *time.Duration) (*CreatedKey, error)
+    ListKeys(ctx context.Context) ([]KeyMeta, error)
+    GetKey(ctx context.Context, id string) (*KeyMeta, error)
+    RotateKey(ctx context.Context, id string) (*CreatedKey, error)
+    RevokeKey(ctx context.Context, id string) error
+}
+
+// KeyValidationResult 是 ValidateAPIKey 的返回值（替代原 bool）
+type KeyValidationResult struct {
+    Valid       bool
+    KeyID       string
+    Permissions KeyPermissions
+}
+```
+
+#### 7.2.3 API 端点
+
+```
+POST /api/v2/keys
+Authorization: Bearer <admin_api_key>
+Content-Type: application/json
+
+Request:  { "name": string, "publish": [string], "subscribe": [string], "admin": bool, "expires_in"?: string }
+Success:  { "ok": true, "key": string, "meta": { ... } }
+
+GET /api/v2/keys
+Authorization: Bearer <admin_api_key>
+Success:  { "ok": true, "keys": [ { ... } ] }
+
+GET /api/v2/keys/{id}
+Authorization: Bearer <admin_api_key>
+Success:  { "ok": true, "meta": { ... } }
+
+DELETE /api/v2/keys/{id}
+Authorization: Bearer <admin_api_key>
+Success:  { "ok": true }
+
+POST /api/v2/keys/{id}/rotate
+Authorization: Bearer <admin_api_key>
+Success:  { "ok": true, "key": string, "meta": { ... } }
+```
+
+#### 7.2.4 数据模型
+
+```sql
+CREATE TABLE IF NOT EXISTS api_keys (
+    id          TEXT PRIMARY KEY,            -- UUID v4
+    name        TEXT NOT NULL UNIQUE,        -- 人类可读标签
+    key_hash    TEXT NOT NULL UNIQUE,        -- SHA-256(key)
+    key_prefix  TEXT NOT NULL,               -- key 前 8 字符，用于日志和识别
+    permissions JSONB NOT NULL DEFAULT '{}', -- { publish: [...], subscribe: [...], admin: bool }
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at  TIMESTAMPTZ,                 -- NULL = 永不过期
+    revoked_at  TIMESTAMPTZ                  -- NULL = 有效
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys (key_hash);
+```
+
+迁移版本：v3（v1 = schema_migrations + channels，v2 = messages + 索引，v3 = api_keys）。
+
+#### 7.2.5 技术决策
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| Key 哈希算法 | SHA-256 | API Key 是机器凭证非用户密码，不需要 bcrypt 的慢哈希；SHA-256 查找快速，恒定时间比较 + DB 索引保证安全性 |
+| Key 标识方式 | 前缀 `aek_` + Base64url | 前缀便于日志审计和 Key 扫描，Base64url 遵循 NFR-9 |
+| 配置文件 Key 迁移 | 启动时幂等迁移到 api_keys 表 | 向后兼容，现有部署无需改配置；幂等保证重复启动安全 |
+| ValidateAPIKey 缓存 | sync.Map 内存缓存，撤销/轮换时主动淘汰 | 避免每条消息都查库；Key 变更频率低，主动淘汰保证即时生效 |
+| 管理端点路径 | `/api/v2/keys` | v2 API 版本化路径，与 v1 发布端点清晰分离 |
+| 管理员区分 | 通过 Key 的 `admin` 权限字段 | 统一权限模型，Key 自身携带角色信息 |
+| 权限存储格式 | JSONB，字段为 `["pattern", ...]` | 灵活可扩展，前缀通配符复用 auth 模块 `prefix.*` 匹配逻辑 |
+
+#### 7.2.6 新增错误码
+
+| 代码 | 类别 | 描述 |
+|------|------|------|
+| 40302 | 授权 | 非管理员尝试访问 Key 管理端点 |
+| 40401 | 资源 | 指定 Key 不存在 |
+| 40901 | 冲突 | Key name 重复 |
