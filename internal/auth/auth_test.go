@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"errors"
@@ -9,25 +10,105 @@ import (
 	"time"
 
 	"github.com/aether-mq/aether/internal/config"
+	"github.com/aether-mq/aether/internal/store"
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// --- mockKeyStore ---
+
+type mockKeyStore struct {
+	keysByHash map[string]*store.APIKey // key_hash → *store.APIKey
+	createErr  error
+}
+
+func newMockKeyStore() *mockKeyStore {
+	return &mockKeyStore{keysByHash: make(map[string]*store.APIKey)}
+}
+
+func (m *mockKeyStore) CreateAPIKey(ctx context.Context, key *store.APIKey) error {
+	if m.createErr != nil {
+		return m.createErr
+	}
+	key.CreatedAt = time.Now()
+	clone := *key
+	m.keysByHash[key.KeyHash] = &clone
+	return nil
+}
+
+func (m *mockKeyStore) GetAPIKey(ctx context.Context, id string) (*store.APIKey, error) {
+	return nil, store.ErrAPIKeyNotFound
+}
+func (m *mockKeyStore) ListAPIKeys(ctx context.Context) ([]store.APIKey, error) {
+	return nil, nil
+}
+func (m *mockKeyStore) RevokeAPIKey(ctx context.Context, id string) error {
+	return store.ErrAPIKeyNotFound
+}
+func (m *mockKeyStore) RotateAPIKey(ctx context.Context, id string, newHash, newPrefix string) error {
+	return store.ErrAPIKeyNotFound
+}
+
+func (m *mockKeyStore) GetAPIKeyByHash(ctx context.Context, hash string) (*store.APIKey, error) {
+	k, ok := m.keysByHash[hash]
+	if !ok {
+		return nil, store.ErrAPIKeyNotFound
+	}
+	clone := *k
+	return &clone, nil
+}
+
+func (m *mockKeyStore) addKey(rawKey string) *store.APIKey {
+	hash := sha256Hex(rawKey)
+	k := &store.APIKey{
+		ID:          "id-" + rawKey[:8],
+		Name:        "key-" + rawKey[:8],
+		KeyHash:     hash,
+		KeyPrefix:   rawKey[:8],
+		Permissions: store.KeyPermissions{Admin: true},
+		CreatedAt:   time.Now(),
+	}
+	m.keysByHash[hash] = k
+	return k
+}
+
+// --- auth test helper ---
+
+var testAPIKeys = []string{
+	"YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY",
+	"QkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWjAxMjM0NTY3ODk",
+}
+
 func newTestAuth(t *testing.T) Auth {
 	t.Helper()
+	ks := newMockKeyStore()
+	for _, k := range testAPIKeys {
+		ks.addKey(k)
+	}
 	cfg := &config.AuthConfig{
 		JWTSigningKey: strings.Repeat("a", 32),
 		JWTClockSkew:  30 * time.Second,
-		APIKeys: []config.APIKeyEntry{
-			{Key: "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY", Description: "test"},
-			{Key: "QkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWjAxMjM0NTY3ODk", Description: "second"},
-		},
 	}
-	a, err := New(cfg)
+	a, err := New(cfg, ks)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return a
 }
+
+func newTestAuthWithStore(t *testing.T, ks *mockKeyStore) Auth {
+	t.Helper()
+	cfg := &config.AuthConfig{
+		JWTSigningKey: strings.Repeat("a", 32),
+		JWTClockSkew:  30 * time.Second,
+	}
+	a, err := New(cfg, ks)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return a
+}
+
+// --- token helpers ---
 
 func generateToken(t *testing.T, signingKey string, subject string, channels []string, exp time.Time) string {
 	t.Helper()
@@ -96,18 +177,19 @@ func generateNoneToken(t *testing.T, subject string, channels []string) string {
 	return s
 }
 
-// ── A-1: API Key Validation ──
+// ── A-1 / K-11: API Key Validation ──
 
 func TestValidateAPIKey(t *testing.T) {
 	a := newTestAuth(t)
+	ctx := context.Background()
 
 	tests := []struct {
 		name   string
 		key    string
 		expect bool
 	}{
-		{"first valid key", "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY", true},
-		{"second valid key", "QkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWjAxMjM0NTY3ODk", true},
+		{"first valid key", testAPIKeys[0], true},
+		{"second valid key", testAPIKeys[1], true},
 		{"invalid key", "invalid_key_that_does_not_match_anything_XXXX", false},
 		{"empty key", "", false},
 		{"wrong case", "ywjjzgvmz2hpamtsbw5vchfyc3r1dnd4exoxmjm0nty", false},
@@ -116,26 +198,97 @@ func TestValidateAPIKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := a.ValidateAPIKey(tt.key)
-			if got != tt.expect {
-				t.Errorf("ValidateAPIKey(%q) = %v, want %v", tt.key, got, tt.expect)
+			result, err := a.ValidateAPIKey(ctx, tt.key)
+			if err != nil {
+				t.Fatalf("ValidateAPIKey error: %v", err)
+			}
+			if result.Valid != tt.expect {
+				t.Errorf("ValidateAPIKey(%q) Valid = %v, want %v", tt.key, result.Valid, tt.expect)
 			}
 		})
 	}
 }
 
 func TestValidateAPIKey_NoKeys(t *testing.T) {
-	cfg := &config.AuthConfig{
-		JWTSigningKey: strings.Repeat("a", 32),
-		JWTClockSkew:  30 * time.Second,
-		APIKeys:       nil,
-	}
-	a, err := New(cfg)
+	ks := newMockKeyStore()
+	a := newTestAuthWithStore(t, ks)
+	ctx := context.Background()
+
+	result, err := a.ValidateAPIKey(ctx, "anything")
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("ValidateAPIKey error: %v", err)
 	}
-	if a.ValidateAPIKey("anything") {
-		t.Error("ValidateAPIKey should return false when no keys are configured")
+	if result.Valid {
+		t.Error("ValidateAPIKey should return Valid=false when no keys are configured")
+	}
+}
+
+func TestValidateAPIKey_NotExpiredKey(t *testing.T) {
+	ks := newMockKeyStore()
+	rawKey := "test-key-for-not-expired-check-abcdefghijklmn"
+	k := ks.addKey(rawKey)
+	k.ExpiresAt = nil // no expiry
+	a := newTestAuthWithStore(t, ks)
+
+	result, err := a.ValidateAPIKey(context.Background(), rawKey)
+	if err != nil {
+		t.Fatalf("ValidateAPIKey error: %v", err)
+	}
+	if !result.Valid {
+		t.Error("non-expired key should be valid")
+	}
+}
+
+func TestValidateAPIKey_ExpiredKey(t *testing.T) {
+	ks := newMockKeyStore()
+	rawKey := "test-key-that-has-already-expired-abcdefghij"
+	k := ks.addKey(rawKey)
+	past := time.Now().Add(-time.Hour)
+	k.ExpiresAt = &past
+	a := newTestAuthWithStore(t, ks)
+
+	result, err := a.ValidateAPIKey(context.Background(), rawKey)
+	if err != nil {
+		t.Fatalf("ValidateAPIKey error: %v", err)
+	}
+	if result.Valid {
+		t.Error("expired key should be invalid")
+	}
+}
+
+func TestValidateAPIKey_RevokedKey(t *testing.T) {
+	ks := newMockKeyStore()
+	rawKey := "test-key-that-has-been-revoked-abcdefghijklm"
+	k := ks.addKey(rawKey)
+	now := time.Now()
+	k.RevokedAt = &now
+	a := newTestAuthWithStore(t, ks)
+
+	result, err := a.ValidateAPIKey(context.Background(), rawKey)
+	if err != nil {
+		t.Fatalf("ValidateAPIKey error: %v", err)
+	}
+	if result.Valid {
+		t.Error("revoked key should be invalid")
+	}
+}
+
+func TestValidateAPIKey_ReturnsPermissions(t *testing.T) {
+	a := newTestAuth(t)
+	ctx := context.Background()
+
+	result, err := a.ValidateAPIKey(ctx, testAPIKeys[0])
+	if err != nil {
+		t.Fatalf("ValidateAPIKey error: %v", err)
+	}
+	if !result.Valid {
+		t.Fatal("expected valid result")
+	}
+	if result.KeyID == "" {
+		t.Error("expected non-empty KeyID")
+	}
+	if !result.Permissions.Admin {
+		t.Error("expected Admin=true for bootstrap key")
 	}
 }
 
@@ -220,7 +373,7 @@ func TestParseAndValidateToken_Expiry(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		expOffset time.Duration // offset from now for token expiration; 0 means no expiry, -1 means compute inside loop
+		expOffset time.Duration
 		wantErr   error
 	}{
 		{"valid unexpired", time.Hour, nil},
@@ -235,7 +388,7 @@ func TestParseAndValidateToken_Expiry(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var exp time.Time
 			if tt.expOffset == -1 {
-				exp = time.Time{} // no expiry
+				exp = time.Time{}
 			} else {
 				exp = time.Now().Add(tt.expOffset)
 			}
@@ -255,11 +408,12 @@ func TestParseAndValidateToken_Expiry(t *testing.T) {
 }
 
 func TestParseAndValidateToken_LargeClockSkew(t *testing.T) {
+	ks := newMockKeyStore()
 	cfg := &config.AuthConfig{
 		JWTSigningKey: strings.Repeat("a", 32),
 		JWTClockSkew:  5 * time.Minute,
 	}
-	a, err := New(cfg)
+	a, err := New(cfg, ks)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -294,7 +448,7 @@ func TestIsChannelAuthorized(t *testing.T) {
 		{"mixed patterns no match", &Claims{Channels: []string{"admin", "system.*"}}, "user.1234", false},
 		{"multiple wildcards match", &Claims{Channels: []string{"a.*", "b.*"}}, "b.child", true},
 		{"wildcard bare dot", &Claims{Channels: []string{".*"}}, "anything", false},
-			{"nil claims", nil, "anything", false},
+		{"nil claims", nil, "anything", false},
 		{"empty channels", &Claims{Channels: []string{}}, "anything", false},
 	}
 
@@ -352,7 +506,8 @@ func TestNew(t *testing.T) {
 			JWTSigningKey: strings.Repeat("a", 32),
 			JWTClockSkew:  30 * time.Second,
 		}
-		a, err := New(cfg)
+		ks := newMockKeyStore()
+		a, err := New(cfg, ks)
 		if err != nil {
 			t.Errorf("New with valid config: %v", err)
 		}
@@ -362,9 +517,19 @@ func TestNew(t *testing.T) {
 	})
 
 	t.Run("nil config", func(t *testing.T) {
-		_, err := New(nil)
+		_, err := New(nil, newMockKeyStore())
 		if err == nil {
 			t.Error("New(nil) should return error")
+		}
+	})
+
+	t.Run("nil keystore", func(t *testing.T) {
+		cfg := &config.AuthConfig{
+			JWTSigningKey: strings.Repeat("a", 32),
+		}
+		_, err := New(cfg, nil)
+		if err == nil {
+			t.Error("New with nil keystore should return error")
 		}
 	})
 }

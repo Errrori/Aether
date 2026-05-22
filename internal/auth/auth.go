@@ -1,11 +1,14 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/aether-mq/aether/internal/config"
+	"github.com/aether-mq/aether/internal/store"
 )
 
 var (
@@ -15,13 +18,23 @@ var (
 	ErrUnauthorizedChannel = errors.New("unauthorized channel")
 )
 
+// Claims holds the identity and channel authorizations extracted from a JWT.
 type Claims struct {
 	Subject  string
 	Channels []string
 }
 
+// KeyValidationResult is returned by ValidateAPIKey, replacing the previous bool.
+type KeyValidationResult struct {
+	Valid       bool
+	KeyID       string
+	Permissions store.KeyPermissions
+}
+
+// Auth is the authentication and authorization interface for Aether.
 type Auth interface {
-	ValidateAPIKey(key string) bool
+	ValidateAPIKey(ctx context.Context, key string) (KeyValidationResult, error)
+	InvalidateCache(keyHash string)
 	ParseAndValidateToken(tokenString string) (*Claims, error)
 	IsChannelAuthorized(claims *Claims, channel string) bool
 }
@@ -29,22 +42,22 @@ type Auth interface {
 type authService struct {
 	signingKey []byte
 	clockSkew  time.Duration
-	apiKeys    [][]byte
+	keyStore   store.KeyStore
+	cache      sync.Map // key_hash → *store.APIKey
 }
 
-func New(cfg *config.AuthConfig) (Auth, error) {
+// New creates an Auth service backed by the given KeyStore.
+func New(cfg *config.AuthConfig, ks store.KeyStore) (Auth, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("auth config is nil")
 	}
-
-	keys := make([][]byte, len(cfg.APIKeys))
-	for i, entry := range cfg.APIKeys {
-		keys[i] = []byte(entry.Key)
+	if ks == nil {
+		return nil, fmt.Errorf("keystore is nil")
 	}
 
 	return &authService{
 		signingKey: []byte(cfg.JWTSigningKey),
 		clockSkew:  cfg.JWTClockSkew,
-		apiKeys:    keys,
+		keyStore:   ks,
 	}, nil
 }

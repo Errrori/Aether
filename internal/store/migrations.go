@@ -14,26 +14,40 @@ var migrations = []migration{
 	{
 		Version: 1,
 		SQL: `CREATE TABLE IF NOT EXISTS channels (
-    name        TEXT PRIMARY KEY,
-    current_seq BIGINT NOT NULL DEFAULT 0,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);`,
+	    name        TEXT PRIMARY KEY,
+	    current_seq BIGINT NOT NULL DEFAULT 0,
+	    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+	    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+	);`,
 	},
 	{
 		Version: 2,
 		SQL: `CREATE TABLE IF NOT EXISTS messages (
-    id              BIGSERIAL PRIMARY KEY,
-    channel         TEXT NOT NULL REFERENCES channels(name),
-    seq_id          BIGINT NOT NULL,
-    payload         JSONB NOT NULL,
-    idempotency_key TEXT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (channel, seq_id),
-    UNIQUE (channel, idempotency_key)
-);
-CREATE INDEX IF NOT EXISTS idx_messages_channel_seq ON messages (channel, seq_id);
-CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages (created_at);`,
+	    id              BIGSERIAL PRIMARY KEY,
+	    channel         TEXT NOT NULL REFERENCES channels(name),
+	    seq_id          BIGINT NOT NULL,
+	    payload         JSONB NOT NULL,
+	    idempotency_key TEXT,
+	    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+	    UNIQUE (channel, seq_id),
+	    UNIQUE (channel, idempotency_key)
+	);
+	CREATE INDEX IF NOT EXISTS idx_messages_channel_seq ON messages (channel, seq_id);
+	CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages (created_at);`,
+	},
+	{
+		Version: 3,
+		SQL: `CREATE TABLE IF NOT EXISTS api_keys (
+	    id          TEXT PRIMARY KEY,
+	    name        TEXT NOT NULL UNIQUE,
+	    key_hash    TEXT NOT NULL UNIQUE,
+	    key_prefix  TEXT NOT NULL,
+	    permissions JSONB NOT NULL DEFAULT '{}',
+	    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+	    expires_at  TIMESTAMPTZ,
+	    revoked_at  TIMESTAMPTZ
+	);
+	CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys (key_hash);`,
 	},
 }
 
@@ -42,9 +56,9 @@ CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages (created_at);`,
 func (s *pgStore) RunMigrations(ctx context.Context) error {
 	// Bootstrap: ensure schema_migrations table exists before we can track versions.
 	_, err := s.pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
-    version    INTEGER PRIMARY KEY,
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);`)
+	    version    INTEGER PRIMARY KEY,
+	    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	);`)
 	if err != nil {
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}

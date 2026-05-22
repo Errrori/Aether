@@ -17,6 +17,7 @@ import (
 	"github.com/aether-mq/aether/internal/auth"
 	"github.com/aether-mq/aether/internal/config"
 	"github.com/aether-mq/aether/internal/hub"
+	"github.com/aether-mq/aether/internal/keymgmt"
 	"github.com/aether-mq/aether/internal/metrics"
 	"github.com/aether-mq/aether/internal/store"
 	"github.com/aether-mq/aether/internal/ws"
@@ -61,7 +62,14 @@ func run() error {
 	}
 
 	// 5. Auth.
-	au, err := auth.New(&cfg.Auth)
+	ks, ok := st.(store.KeyStore)
+	if !ok {
+		return fmt.Errorf("store does not implement KeyStore")
+	}
+	if err := auth.BootstrapConfigKeys(context.Background(), ks, cfg.Auth.APIKeys); err != nil {
+		return fmt.Errorf("bootstrap config keys: %w", err)
+	}
+	au, err := auth.New(&cfg.Auth, ks)
 	if err != nil {
 		return fmt.Errorf("auth: %w", err)
 	}
@@ -85,10 +93,11 @@ func run() error {
 	slog.Info("websocket manager ready")
 
 	// 9. HTTP API server.
+	km := keymgmt.New(ks)
 	apiCfg := api.ServerConfig{
 		MaxPayloadSize: cfg.Server.MaxPayloadSize,
 	}
-	srv := api.New(h, au, st, wsm, apiCfg)
+	srv := api.New(h, au, st, km, ks, wsm, apiCfg)
 
 	// 10. Background tasks: eviction loop.
 	evictCtx, evictCancel := context.WithCancel(context.Background())

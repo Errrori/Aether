@@ -86,7 +86,10 @@ func newMockAuth() *mockAuth {
 	return &mockAuth{authorized: make(map[string]bool)}
 }
 
-func (a *mockAuth) ValidateAPIKey(key string) bool                          { return true }
+func (a *mockAuth) ValidateAPIKey(ctx context.Context, key string) (auth.KeyValidationResult, error) {
+	return auth.KeyValidationResult{Valid: true}, nil
+}
+func (a *mockAuth) InvalidateCache(keyHash string) {}
 func (a *mockAuth) ParseAndValidateToken(tokenString string) (*auth.Claims, error) { return nil, nil }
 func (a *mockAuth) IsChannelAuthorized(claims *auth.Claims, channel string) bool {
 	ok, exists := a.authorized[channel]

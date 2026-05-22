@@ -60,7 +60,7 @@ func newTestStore(t *testing.T) *pgStore {
 func truncateAll(t *testing.T, s *pgStore) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := s.pool.Exec(ctx, `TRUNCATE messages, channels RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := s.pool.Exec(ctx, `TRUNCATE api_keys, messages, channels RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("truncate test tables: %v", err)
 	}
 }
@@ -70,7 +70,7 @@ func truncateAll(t *testing.T, s *pgStore) {
 func TestRunMigrations_EmptyDB(t *testing.T) {
 	s := newTestStore(t)
 
-	tables := []string{"channels", "messages", "schema_migrations"}
+	tables := []string{"channels", "messages", "api_keys", "schema_migrations"}
 	for _, tbl := range tables {
 		var exists bool
 		err := s.pool.QueryRow(context.Background(),
@@ -116,8 +116,8 @@ func TestRunMigrations_VersionTracking(t *testing.T) {
 		}
 		versions = append(versions, v)
 	}
-	if len(versions) != 2 || versions[0] != 1 || versions[1] != 2 {
-		t.Fatalf("expected versions [1 2], got %v", versions)
+	if len(versions) != 3 || versions[0] != 1 || versions[1] != 2 || versions[2] != 3 {
+		t.Fatalf("expected versions [1 2 3], got %v", versions)
 	}
 }
 

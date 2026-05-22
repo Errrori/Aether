@@ -15,7 +15,11 @@ const (
 	ErrCodeInvalidToken    = 40102
 	ErrCodeUnauthorizedChannel = 40301
 	ErrCodePayloadTooLarge = 41301
+	ErrCodeNotAdmin        = 40302
+	ErrCodeKeyNotFound     = 40401
+	ErrCodeKeyNameConflict = 40901
 	ErrCodeRateLimited     = 42901 // v2 预留
+	ErrCodeInternal        = 50001
 	ErrCodeStorageFailure  = 50301
 )
 

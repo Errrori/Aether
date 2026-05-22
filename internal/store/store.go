@@ -33,6 +33,37 @@ type Store interface {
 	Close()
 }
 
+// KeyPermissions defines the channel-level access control for an API key.
+// It is stored as JSONB in the api_keys table.
+type KeyPermissions struct {
+	Publish   []string `json:"publish"`
+	Subscribe []string `json:"subscribe"`
+	Admin     bool     `json:"admin"`
+}
+
+// APIKey represents a row in the api_keys table.
+type APIKey struct {
+	ID          string
+	Name        string
+	KeyHash     string
+	KeyPrefix   string
+	Permissions KeyPermissions
+	CreatedAt   time.Time
+	ExpiresAt   *time.Time
+	RevokedAt   *time.Time
+}
+
+// KeyStore defines persistence operations for API keys.
+// Implemented by *pgStore alongside the Store interface.
+type KeyStore interface {
+	CreateAPIKey(ctx context.Context, key *APIKey) error
+	GetAPIKey(ctx context.Context, id string) (*APIKey, error)
+	ListAPIKeys(ctx context.Context) ([]APIKey, error)
+	GetAPIKeyByHash(ctx context.Context, hash string) (*APIKey, error)
+	RevokeAPIKey(ctx context.Context, id string) error
+	RotateAPIKey(ctx context.Context, id string, newHash, newPrefix string) error
+}
+
 // ValidateChannelName checks that a channel name conforms to the Aether naming rules
 // (1-128 chars, alphanumeric plus _ . / -, no consecutive dots).
 func ValidateChannelName(name string) error {

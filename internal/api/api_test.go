@@ -13,6 +13,7 @@ import (
 
 	"github.com/aether-mq/aether/internal/auth"
 	"github.com/aether-mq/aether/internal/hub"
+	"github.com/aether-mq/aether/internal/keymgmt"
 	"github.com/aether-mq/aether/internal/store"
 )
 
@@ -51,9 +52,14 @@ func newMockAuth() *mockAuth {
 	return &mockAuth{validAPIKeys: map[string]bool{"valid-key": true}}
 }
 
-func (a *mockAuth) ValidateAPIKey(key string) bool {
-	return a.validAPIKeys[key]
+func (a *mockAuth) ValidateAPIKey(ctx context.Context, key string) (auth.KeyValidationResult, error) {
+	admin, ok := a.validAPIKeys[key]
+	if !ok {
+		return auth.KeyValidationResult{}, nil
+	}
+	return auth.KeyValidationResult{Valid: true, KeyID: "mock-id", Permissions: store.KeyPermissions{Admin: admin}}, nil
 }
+func (a *mockAuth) InvalidateCache(keyHash string) {}
 
 func (a *mockAuth) ParseAndValidateToken(tokenString string) (*auth.Claims, error) {
 	return nil, nil
@@ -111,9 +117,23 @@ func newTestServer(t *testing.T) (*Server, *mockHub, *mockAuth, *mockStore) {
 	h := newMockHub()
 	a := newMockAuth()
 	s := newMockStore()
+	km := newMockKeyManager()
+	ks := newMockKeyStore()
 	cfg := ServerConfig{MaxPayloadSize: 65536}
-	server := New(h, a, s, nil, cfg)
+	server := New(h, a, s, km, ks, nil, cfg)
 	return server, h, a, s
+}
+
+func newTestServerV2(t *testing.T) (*Server, *mockHub, *mockAuth, *mockStore, *mockKeyManager, *mockKeyStore) {
+	t.Helper()
+	h := newMockHub()
+	a := newMockAuth()
+	s := newMockStore()
+	km := newMockKeyManager()
+	ks := newMockKeyStore()
+	cfg := ServerConfig{MaxPayloadSize: 65536}
+	server := New(h, a, s, km, ks, nil, cfg)
+	return server, h, a, s, km, ks
 }
 
 func doRequest(t *testing.T, server *Server, method, path string, body io.Reader, headers map[string]string) *http.Response {
@@ -653,5 +673,358 @@ func TestShutdown_ReadyState(t *testing.T) {
 	}
 	if server.ready.Load() {
 		t.Fatal("expected not ready after Shutdown")
+	}
+}
+
+// --- mockKeyManager ---
+
+type mockKeyManager struct {
+	keys       map[string]*keymgmt.CreatedKey
+	createErr  error
+	listErr    error
+	getErr     error
+	revokeErr  error
+	rotateErr  error
+}
+
+func newMockKeyManager() *mockKeyManager {
+	return &mockKeyManager{keys: make(map[string]*keymgmt.CreatedKey)}
+}
+
+func (m *mockKeyManager) CreateKey(ctx context.Context, name string, perms store.KeyPermissions, expiresIn *time.Duration) (*keymgmt.CreatedKey, error) {
+	if m.createErr != nil {
+		return nil, m.createErr
+	}
+	id := fmt.Sprintf("test-id-%d", len(m.keys)+1)
+	prefix := "aek_test"
+	ck := &keymgmt.CreatedKey{
+		Key: "aek_" + id,
+		Meta: keymgmt.KeyMeta{
+			ID: id, Name: name, KeyPrefix: prefix,
+			Permissions: perms, CreatedAt: time.Now(),
+		},
+	}
+	if expiresIn != nil {
+		t := time.Now().Add(*expiresIn)
+		ck.Meta.ExpiresAt = &t
+	}
+	m.keys[id] = ck
+	return ck, nil
+}
+
+func (m *mockKeyManager) GetKey(ctx context.Context, id string) (*keymgmt.KeyMeta, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
+	ck, ok := m.keys[id]
+	if !ok {
+		return nil, store.ErrAPIKeyNotFound
+	}
+	return &ck.Meta, nil
+}
+
+func (m *mockKeyManager) ListKeys(ctx context.Context) ([]keymgmt.KeyMeta, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	out := make([]keymgmt.KeyMeta, 0, len(m.keys))
+	for _, ck := range m.keys {
+		out = append(out, ck.Meta)
+	}
+	return out, nil
+}
+
+func (m *mockKeyManager) RotateKey(ctx context.Context, id string) (*keymgmt.CreatedKey, error) {
+	if m.rotateErr != nil {
+		return nil, m.rotateErr
+	}
+	ck, ok := m.keys[id]
+	if !ok {
+		return nil, store.ErrAPIKeyNotFound
+	}
+	newKey := "aek_rotated_" + id
+	ck.Key = newKey
+	ck.Meta.KeyPrefix = newKey[:8]
+	return ck, nil
+}
+
+func (m *mockKeyManager) RevokeKey(ctx context.Context, id string) error {
+	if m.revokeErr != nil {
+		return m.revokeErr
+	}
+	if _, ok := m.keys[id]; !ok {
+		return store.ErrAPIKeyNotFound
+	}
+	delete(m.keys, id)
+	return nil
+}
+
+// --- mockKeyStore ---
+
+type mockKeyStore struct {
+	keys map[string]*store.APIKey
+}
+
+func newMockKeyStore() *mockKeyStore {
+	return &mockKeyStore{keys: make(map[string]*store.APIKey)}
+}
+
+func (m *mockKeyStore) CreateAPIKey(ctx context.Context, key *store.APIKey) error { return nil }
+func (m *mockKeyStore) GetAPIKey(ctx context.Context, id string) (*store.APIKey, error) {
+	k, ok := m.keys[id]
+	if !ok {
+		return nil, store.ErrAPIKeyNotFound
+	}
+	return k, nil
+}
+func (m *mockKeyStore) ListAPIKeys(ctx context.Context) ([]store.APIKey, error) { return nil, nil }
+func (m *mockKeyStore) GetAPIKeyByHash(ctx context.Context, hash string) (*store.APIKey, error) {
+	return nil, store.ErrAPIKeyNotFound
+}
+func (m *mockKeyStore) RevokeAPIKey(ctx context.Context, id string) error  { return nil }
+func (m *mockKeyStore) RotateAPIKey(ctx context.Context, id string, newHash, newPrefix string) error {
+	return nil
+}
+
+// --- tests: v2 keys ---
+
+func TestCreateKey_Success(t *testing.T) {
+	server, _, _, _, _, _ := newTestServerV2(t)
+
+	body := strings.NewReader(`{"name":"my-key","publish":["orders.*"],"subscribe":["*"],"admin":false}`)
+	resp := doRequest(t, server, "POST", "/api/v2/keys", body, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	json := readJSON(t, resp)
+	if json["ok"] != true {
+		t.Fatalf("expected ok=true, got %v", json["ok"])
+	}
+	if json["key"] == nil || json["key"] == "" {
+		t.Fatal("expected non-empty key")
+	}
+	if json["meta"] == nil {
+		t.Fatal("expected meta field")
+	}
+}
+
+func TestCreateKey_DuplicateName(t *testing.T) {
+	server, _, _, _, km, _ := newTestServerV2(t)
+	km.createErr = store.ErrAPIKeyDuplicateName
+
+	body := strings.NewReader(`{"name":"dup","publish":[],"subscribe":[],"admin":false}`)
+	resp := doRequest(t, server, "POST", "/api/v2/keys", body, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", resp.StatusCode)
+	}
+	json := readJSON(t, resp)
+	errObj := json["error"].(map[string]any)
+	if errObj["code"] != float64(ErrCodeKeyNameConflict) {
+		t.Fatalf("expected code %d, got %v", ErrCodeKeyNameConflict, errObj["code"])
+	}
+}
+
+func TestCreateKey_MissingName(t *testing.T) {
+	server, _, _, _, _, _ := newTestServerV2(t)
+
+	body := strings.NewReader(`{"publish":[],"subscribe":[],"admin":false}`)
+	resp := doRequest(t, server, "POST", "/api/v2/keys", body, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateKey_WithExpiresIn(t *testing.T) {
+	server, _, _, _, _, _ := newTestServerV2(t)
+
+	body := strings.NewReader(`{"name":"expiring","publish":[],"subscribe":[],"admin":false,"expires_in":"24h"}`)
+	resp := doRequest(t, server, "POST", "/api/v2/keys", body, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateKey_Unauthorized(t *testing.T) {
+	server, _, _, _, _, _ := newTestServerV2(t)
+
+	body := strings.NewReader(`{"name":"no-auth","publish":[],"subscribe":[],"admin":false}`)
+	resp := doRequest(t, server, "POST", "/api/v2/keys", body, map[string]string{
+		"Authorization": "Bearer invalid-key",
+	})
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateKey_NotAdmin(t *testing.T) {
+	server, _, a, _, _, _ := newTestServerV2(t)
+	// Add a key that is valid but not admin.
+	a.validAPIKeys["non-admin"] = false
+
+	body := strings.NewReader(`{"name":"no-admin","publish":[],"subscribe":[],"admin":false}`)
+	resp := doRequest(t, server, "POST", "/api/v2/keys", body, map[string]string{
+		"Authorization": "Bearer non-admin",
+	})
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", resp.StatusCode)
+	}
+	json := readJSON(t, resp)
+	errObj := json["error"].(map[string]any)
+	if errObj["code"] != float64(ErrCodeNotAdmin) {
+		t.Fatalf("expected code %d, got %v", ErrCodeNotAdmin, errObj["code"])
+	}
+}
+
+func TestListKeys_Success(t *testing.T) {
+	server, _, _, _, _, _ := newTestServerV2(t)
+
+	resp := doRequest(t, server, "GET", "/api/v2/keys", nil, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	json := readJSON(t, resp)
+	if json["ok"] != true {
+		t.Fatalf("expected ok=true, got %v", json["ok"])
+	}
+	if json["keys"] == nil {
+		t.Fatal("expected keys field")
+	}
+}
+
+func TestListKeys_Empty(t *testing.T) {
+	server, _, _, _, _, _ := newTestServerV2(t)
+
+	resp := doRequest(t, server, "GET", "/api/v2/keys", nil, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestListKeys_Unauthorized(t *testing.T) {
+	server, _, _, _, _, _ := newTestServerV2(t)
+
+	resp := doRequest(t, server, "GET", "/api/v2/keys", nil, map[string]string{
+		"Authorization": "Bearer invalid-key",
+	})
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestGetKey_Success(t *testing.T) {
+	server, _, _, _, km, _ := newTestServerV2(t)
+	ck, _ := km.CreateKey(context.Background(), "get-test", store.KeyPermissions{}, nil)
+
+	resp := doRequest(t, server, "GET", "/api/v2/keys/"+ck.Meta.ID, nil, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	json := readJSON(t, resp)
+	if json["ok"] != true {
+		t.Fatalf("expected ok=true, got %v", json["ok"])
+	}
+	if json["meta"] == nil {
+		t.Fatal("expected meta field")
+	}
+}
+
+func TestGetKey_NotFound(t *testing.T) {
+	server, _, _, _, _, _ := newTestServerV2(t)
+
+	resp := doRequest(t, server, "GET", "/api/v2/keys/nonexistent", nil, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+	json := readJSON(t, resp)
+	errObj := json["error"].(map[string]any)
+	if errObj["code"] != float64(ErrCodeKeyNotFound) {
+		t.Fatalf("expected code %d, got %v", ErrCodeKeyNotFound, errObj["code"])
+	}
+}
+
+func TestRevokeKey_Success(t *testing.T) {
+	server, _, _, _, km, ks := newTestServerV2(t)
+	ck, _ := km.CreateKey(context.Background(), "revoke-test", store.KeyPermissions{}, nil)
+	ks.keys[ck.Meta.ID] = &store.APIKey{ID: ck.Meta.ID, KeyHash: "old-hash"}
+
+	resp := doRequest(t, server, "DELETE", "/api/v2/keys/"+ck.Meta.ID, nil, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestRevokeKey_NotFound(t *testing.T) {
+	server, _, _, _, _, _ := newTestServerV2(t)
+
+	resp := doRequest(t, server, "DELETE", "/api/v2/keys/nonexistent", nil, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestRotateKey_Success(t *testing.T) {
+	server, _, _, _, km, ks := newTestServerV2(t)
+	ck, _ := km.CreateKey(context.Background(), "rotate-test", store.KeyPermissions{}, nil)
+	ks.keys[ck.Meta.ID] = &store.APIKey{ID: ck.Meta.ID, KeyHash: "old-hash"}
+
+	resp := doRequest(t, server, "POST", "/api/v2/keys/"+ck.Meta.ID+"/rotate", nil, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	json := readJSON(t, resp)
+	if json["ok"] != true {
+		t.Fatalf("expected ok=true, got %v", json["ok"])
+	}
+	if json["key"] == nil || json["key"] == "" {
+		t.Fatal("expected non-empty key")
+	}
+}
+
+func TestRotateKey_NotFound(t *testing.T) {
+	server, _, _, _, _, _ := newTestServerV2(t)
+
+	resp := doRequest(t, server, "POST", "/api/v2/keys/nonexistent/rotate", nil, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
 	}
 }
