@@ -15,7 +15,7 @@ func (h *hubImpl) Subscribe(conn *Connection, channels []string, afterSeq map[st
 
 	// H-10: max channels per subscribe request.
 	if len(channels) > h.config.MaxChannelsPerSubscribe {
-		h.sendError(conn, ErrCodeTooManyPerReq,
+		conn.SendError(ErrCodeTooManyPerReq,
 			fmt.Sprintf("too many channels per request: %d (max %d)", len(channels), h.config.MaxChannelsPerSubscribe))
 		return nil
 	}
@@ -30,11 +30,11 @@ func (h *hubImpl) Subscribe(conn *Connection, channels []string, afterSeq map[st
 
 	for _, ch := range channels {
 		if err := store.ValidateChannelName(ch); err != nil {
-			h.sendError(conn, ErrCodeInvalidChannel, err.Error())
+			conn.SendError(ErrCodeInvalidChannel, err.Error())
 			continue
 		}
 		if !h.auth.IsChannelAuthorized(conn.Claims, ch) {
-			h.sendError(conn, ErrCodeUnauthorized, fmt.Sprintf("unauthorized channel: %s", ch))
+			conn.SendError(ErrCodeUnauthorized, fmt.Sprintf("unauthorized channel: %s", ch))
 			continue
 		}
 		if conn.HasChannel(ch) {
@@ -55,7 +55,7 @@ func (h *hubImpl) Subscribe(conn *Connection, channels []string, afterSeq map[st
 
 	// H-10: total channels per connection limit.
 	if conn.ChannelCount()+len(pending) > h.config.MaxChannelsPerConn {
-		h.sendError(conn, ErrCodeTooManyPerConn,
+		conn.SendError(ErrCodeTooManyPerConn,
 			fmt.Sprintf("total channels would exceed %d", h.config.MaxChannelsPerConn))
 		return nil
 	}
@@ -65,7 +65,7 @@ func (h *hubImpl) Subscribe(conn *Connection, channels []string, afterSeq map[st
 	for _, ps := range pending {
 		if ps.hasAfter {
 			if err := h.replayHistory(conn, ps.channel, ps.afterSeq); err != nil {
-				h.sendError(conn, ErrCodeHistoryFailed,
+				conn.SendError(ErrCodeHistoryFailed,
 					fmt.Sprintf("history read failed for %s: %v", ps.channel, err))
 				continue
 			}
@@ -225,22 +225,6 @@ func (h *hubImpl) RemoveConnection(conn *Connection) {
 }
 
 // --- helpers for sending frames to a connection ---
-
-func (h *hubImpl) sendError(conn *Connection, code int, message string) {
-	data, err := MarshalFrame(ErrorFrame{
-		Type:    FrameTypeError,
-		Code:    code,
-		Message: message,
-	})
-	if err != nil {
-		return
-	}
-	select {
-	case conn.Send <- data:
-	default:
-		conn.Close()
-	}
-}
 
 func (h *hubImpl) sendSubscribed(conn *Connection, channels []string) {
 	data, err := MarshalFrame(SubscribedFrame{

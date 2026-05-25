@@ -123,3 +123,21 @@ func (c *Connection) Close() {
 func (c *Connection) Done() <-chan struct{} {
 	return c.ctx.Done()
 }
+
+// SendError marshals an ErrorFrame and sends it to the connection.
+// If the Send buffer is full the connection is closed.
+func (c *Connection) SendError(code int, message string) {
+	data, err := MarshalFrame(ErrorFrame{
+		Type:    FrameTypeError,
+		Code:    code,
+		Message: message,
+	})
+	if err != nil {
+		return
+	}
+	select {
+	case c.Send <- data:
+	default:
+		c.Close()
+	}
+}

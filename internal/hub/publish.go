@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/aether-mq/aether/internal/store"
@@ -32,7 +33,9 @@ func (h *hubImpl) Publish(ctx context.Context, channel string, payload json.RawM
 	}
 	msgBytes, err := MarshalFrame(frame)
 	if err != nil {
-		// Persisted successfully but couldn't marshal — don't fail the publish.
+		// Persisted successfully but couldn't marshal — don't fail the publish,
+		// but log loudly so operators can detect data-path corruption.
+		slog.Error("marshal frame failed after persist", "channel", channel, "seq", seqID, "err", err)
 		if h.metrics.IncMessagesPublished != nil {
 			h.metrics.IncMessagesPublished(channel)
 		}

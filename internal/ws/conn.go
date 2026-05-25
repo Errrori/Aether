@@ -52,7 +52,7 @@ func readLoop(ac *activeConn, h hub.Hub, maxMessageSize int, wg *sync.WaitGroup)
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(data, &peek); err != nil {
-			sendErrorFrame(ac.hubCnn, hub.ErrCodeInvalidJSON, "invalid json")
+			ac.hubCnn.SendError(hub.ErrCodeInvalidJSON, "invalid json")
 			continue
 		}
 
@@ -60,19 +60,21 @@ func readLoop(ac *activeConn, h hub.Hub, maxMessageSize int, wg *sync.WaitGroup)
 		case clientTypeSubscribe:
 			var req subscribeRequest
 			if err := json.Unmarshal(data, &req); err != nil {
-				sendErrorFrame(ac.hubCnn, hub.ErrCodeInvalidJSON, "invalid subscribe frame")
+				ac.hubCnn.SendError(hub.ErrCodeInvalidJSON, "invalid subscribe frame")
 				continue
 			}
+			// Subscribe sends its own error frames; the only error it returns
+			// is ErrNilConnection, which cannot occur here since hubCnn is non-nil.
 			_ = h.Subscribe(ac.hubCnn, req.Channels, req.AfterSeq)
 		case clientTypeUnsubscribe:
 			var req unsubscribeRequest
 			if err := json.Unmarshal(data, &req); err != nil {
-				sendErrorFrame(ac.hubCnn, hub.ErrCodeInvalidJSON, "invalid unsubscribe frame")
+				ac.hubCnn.SendError(hub.ErrCodeInvalidJSON, "invalid unsubscribe frame")
 				continue
 			}
 			h.Unsubscribe(ac.hubCnn, req.Channels)
 		default:
-			sendErrorFrame(ac.hubCnn, hub.ErrCodeUnknownFrame, "unknown frame type")
+			ac.hubCnn.SendError(hub.ErrCodeUnknownFrame, "unknown frame type")
 		}
 	}
 }
@@ -115,20 +117,5 @@ func heartbeatLoop(ac *activeConn, pingInterval, pongTimeout time.Duration, wg *
 		case <-ac.hubCnn.Done():
 			return
 		}
-	}
-}
-
-func sendErrorFrame(conn *hub.Connection, code int, message string) {
-	frame, err := hub.MarshalFrame(hub.ErrorFrame{
-		Type:    hub.FrameTypeError,
-		Code:    code,
-		Message: message,
-	})
-	if err != nil {
-		return
-	}
-	select {
-	case conn.Send <- frame:
-	default:
 	}
 }
