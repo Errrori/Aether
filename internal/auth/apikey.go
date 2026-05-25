@@ -21,6 +21,13 @@ func (s *authService) InvalidateCache(keyHash string) {
 }
 
 // ValidateAPIKey validates an API key against the api_keys table.
+//
+// The lookup is hash-based (SHA-256 of the plaintext key looked up by DB index)
+// rather than using crypto/subtle.ConstantTimeCompare. This is intentional:
+// ConstantTimeCompare prevents timing attacks when comparing plaintext secrets
+// character-by-character, but here we compare pre-computed hashes via DB query.
+// The DB index lookup is O(1) and does not leak timing information about the
+// original key material.
 func (s *authService) ValidateAPIKey(ctx context.Context, key string) (KeyValidationResult, error) {
 	hash := sha256Hex(key)
 

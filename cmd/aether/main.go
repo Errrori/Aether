@@ -66,7 +66,7 @@ func run() error {
 	if !ok {
 		return fmt.Errorf("store does not implement KeyStore")
 	}
-	if err := auth.BootstrapConfigKeys(context.Background(), ks, cfg.Auth.APIKeys); err != nil {
+	if err := auth.BootstrapConfigKeys(ctx, ks, cfg.Auth.APIKeys); err != nil {
 		return fmt.Errorf("bootstrap config keys: %w", err)
 	}
 	au, err := auth.New(&cfg.Auth, ks)
@@ -107,20 +107,30 @@ func run() error {
 	evictDone.Add(1)
 	go runEvictionLoop(evictCtx, st, cfg.Retention.EvictionInterval, &evictDone)
 
-	// 11. Start the HTTP server (blocks until shutdown).
-	if cfg.Server.TLSCert != "" {
-		slog.Info("starting TLS server", "addr", cfg.Server.Addr)
-		err = srv.ListenAndServeTLS(cfg.Server.Addr, cfg.Server.TLSCert, cfg.Server.TLSKey)
-	} else {
-		slog.Info("starting server", "addr", cfg.Server.Addr)
-		err = srv.ListenAndServe(cfg.Server.Addr)
-	}
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		slog.Error("server stopped unexpectedly", "err", err)
-	}
-	slog.Info("server stopped accepting connections")
+	// 11. Start the HTTP server in a goroutine.
+	serverErr := make(chan error, 1)
+	go func() {
+		if cfg.Server.TLSCert != "" {
+			slog.Info("starting TLS server", "addr", cfg.Server.Addr)
+			serverErr <- srv.ListenAndServeTLS(cfg.Server.Addr, cfg.Server.TLSCert, cfg.Server.TLSKey)
+		} else {
+			slog.Info("starting server", "addr", cfg.Server.Addr)
+			serverErr <- srv.ListenAndServe(cfg.Server.Addr)
+		}
+	}()
 
-	// 12. Shutdown sequence.
+	// 12. Wait for a signal or a server startup error.
+	select {
+	case err = <-serverErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("server: %w", err)
+		}
+		slog.Info("server stopped")
+	case <-ctx.Done():
+		slog.Info("received signal, initiating graceful shutdown")
+	}
+
+	// 13. Shutdown sequence.
 	evictCancel()
 	evictDone.Wait()
 
