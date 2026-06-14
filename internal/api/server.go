@@ -10,7 +10,6 @@ import (
 	"github.com/aether-mq/aether/internal/hub"
 	"github.com/aether-mq/aether/internal/keymgmt"
 	"github.com/aether-mq/aether/internal/store"
-	"github.com/aether-mq/aether/internal/webhook"
 	"github.com/aether-mq/aether/internal/ws"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -20,31 +19,29 @@ type ServerConfig struct {
 }
 
 type Server struct {
-	hub            hub.Hub
-	auth           auth.Auth
-	store          store.Store
-	keyManager     keymgmt.KeyManager
-	keyStore       store.KeyStore
-	webhookManager webhook.WebhookManager
-	wsManager      *ws.Manager
-	cfg            ServerConfig
-	ready          atomic.Bool
-	srv            *http.Server
+	hub        hub.Hub
+	auth       auth.Auth
+	store      store.Store
+	keyManager keymgmt.KeyManager
+	keyStore   store.KeyStore
+	wsManager  *ws.Manager
+	cfg        ServerConfig
+	ready      atomic.Bool
+	srv        *http.Server
 }
 
-func New(h hub.Hub, a auth.Auth, s store.Store, km keymgmt.KeyManager, ks store.KeyStore, whm webhook.WebhookManager, wsm *ws.Manager, cfg ServerConfig) *Server {
+func New(h hub.Hub, a auth.Auth, s store.Store, km keymgmt.KeyManager, ks store.KeyStore, wsm *ws.Manager, cfg ServerConfig) *Server {
 	if cfg.MaxPayloadSize <= 0 {
 		cfg.MaxPayloadSize = 65536
 	}
 	return &Server{
-		hub:            h,
-		auth:           a,
-		store:          s,
-		keyManager:     km,
-		keyStore:       ks,
-		webhookManager: whm,
-		wsManager:      wsm,
-		cfg:            cfg,
+		hub:        h,
+		auth:       a,
+		store:      s,
+		keyManager: km,
+		keyStore:   ks,
+		wsManager:  wsm,
+		cfg:        cfg,
 	}
 }
 
@@ -56,6 +53,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("GET /metricsz", promhttp.Handler().ServeHTTP)
+	mux.HandleFunc("GET /debug/cache", s.handleDebugCache)
 	if s.wsManager != nil {
 		mux.Handle("GET /ws", s.wsManager)
 	}
@@ -66,19 +64,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v2/keys/{id}", s.adminMiddleware(s.handleGetKey))
 	mux.HandleFunc("DELETE /api/v2/keys/{id}", s.adminMiddleware(s.handleRevokeKey))
 	mux.HandleFunc("POST /api/v2/keys/{id}/rotate", s.adminMiddleware(s.handleRotateKey))
-
-	// v2 Batch publish.
-	mux.HandleFunc("POST /api/v2/publish/batch", s.authMiddleware(s.handleBatchPublish))
-
-	// v2 Webhook management (admin middleware).
-	mux.HandleFunc("POST /api/v2/webhooks", s.adminMiddleware(s.handleCreateWebhook))
-	mux.HandleFunc("GET /api/v2/webhooks", s.adminMiddleware(s.handleListWebhooks))
-	mux.HandleFunc("GET /api/v2/webhooks/{id}", s.adminMiddleware(s.handleGetWebhook))
-	mux.HandleFunc("DELETE /api/v2/webhooks/{id}", s.adminMiddleware(s.handleDeleteWebhook))
-	mux.HandleFunc("POST /api/v2/webhooks/{id}/rotate-secret", s.adminMiddleware(s.handleRotateWebhookSecret))
-
-	// v2 Webhook receive (HMAC secured, no auth middleware).
-	mux.HandleFunc("POST /api/v2/webhooks/{id}", s.handleWebhookReceive)
 
 	return mux
 }
@@ -95,6 +80,21 @@ func (s *Server) ListenAndServeTLS(addr, certFile, keyFile string) error {
 	s.ready.Store(true)
 	defer s.ready.Store(false)
 	return s.srv.ListenAndServeTLS(certFile, keyFile)
+}
+
+func (s *Server) handleDebugCache(w http.ResponseWriter, r *http.Request) {
+	hits, misses := s.auth.CacheStats()
+	total := hits + misses
+	var rate float64
+	if total > 0 {
+		rate = float64(hits) / float64(total) * 100
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"cache_hits":   hits,
+		"cache_misses": misses,
+		"hit_rate_pct": rate,
+	})
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {

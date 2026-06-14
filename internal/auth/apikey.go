@@ -16,6 +16,10 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(h[:])
 }
 
+func (s *authService) CacheStats() (int64, int64) {
+	return s.cacheHits.Load(), s.cacheMisses.Load()
+}
+
 func (s *authService) InvalidateCache(keyHash string) {
 	s.cache.Delete(keyHash)
 }
@@ -35,12 +39,14 @@ func (s *authService) ValidateAPIKey(ctx context.Context, key string) (KeyValida
 	if entry, ok := s.cache.Load(hash); ok {
 		cached := entry.(*store.APIKey)
 		if !isExpiredOrRevoked(cached) {
+			s.cacheHits.Add(1)
 			return makeResult(cached, true), nil
 		}
 		s.cache.Delete(hash)
 	}
 
 	// Cache miss — query the database.
+	s.cacheMisses.Add(1)
 	k, err := s.keyStore.GetAPIKeyByHash(ctx, hash)
 	if errors.Is(err, store.ErrAPIKeyNotFound) {
 		return KeyValidationResult{}, nil

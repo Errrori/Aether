@@ -24,7 +24,8 @@ type mockAuth struct {
 func (a *mockAuth) ValidateAPIKey(ctx context.Context, key string) (auth.KeyValidationResult, error) {
 	return auth.KeyValidationResult{}, nil
 }
-func (a *mockAuth) InvalidateCache(keyHash string) {}
+func (a *mockAuth) InvalidateCache(keyHash string)              {}
+func (a *mockAuth) CacheStats() (int64, int64)                  { return 0, 0 }
 
 func (a *mockAuth) ParseAndValidateToken(tokenString string) (*auth.Claims, error) {
 	if tokenString == a.validToken {

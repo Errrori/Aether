@@ -1,0 +1,47 @@
+# Aether 性能基准测试配置
+# 从 config.example.yaml 复制，修改为基准测试环境
+
+# ---- 服务监听 ----
+server:
+  addr: ":8080"
+  max_payload_size: 65536
+
+# ---- 数据库连接（测试用 PostgreSQL，端口 5433）----
+database:
+  dsn: "postgres://aether:aether@localhost:5433/aether_test?sslmode=disable"
+  max_open_conns: 25
+  max_idle_conns: 10
+  conn_max_idle_time: 5m
+  conn_max_lifetime: 30m
+
+# ---- 认证 ----
+auth:
+  jwt_signing_key: "bench-minimum-32-bytes-long-key!!"
+  jwt_clock_skew: 30s
+  api_keys:
+    - key: "bench_hLNjXQ0kyZ5gMweOmrAvlYhU4JD9MTcOQamcC2rHF6U"
+      description: "基准测试发布 Key"
+
+# ---- WebSocket ----
+websocket:
+  ping_interval: 30s
+  pong_timeout: 60s
+  outbound_buffer: 256
+  max_message_size: 65536
+  allowed_origins: ["*"]
+
+# ---- 消息留存策略 ----
+retention:
+  default_ttl: 720h
+  default_max_count: 10000
+  eviction_interval: 5m
+  rules: []
+
+# ---- 优雅关闭 ----
+shutdown:
+  timeout: 10s
+
+# ---- 日志 ----
+log:
+  level: "warn"
+  format: "json"

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aether-mq/aether/internal/config"
@@ -37,6 +38,7 @@ type Auth interface {
 	InvalidateCache(keyHash string)
 	ParseAndValidateToken(tokenString string) (*Claims, error)
 	IsChannelAuthorized(claims *Claims, channel string) bool
+	CacheStats() (hits, misses int64)
 }
 
 type authService struct {
@@ -44,6 +46,9 @@ type authService struct {
 	clockSkew  time.Duration
 	keyStore   store.KeyStore
 	cache      sync.Map // key_hash → *store.APIKey
+
+	cacheHits   atomic.Int64
+	cacheMisses atomic.Int64
 }
 
 // New creates an Auth service backed by the given KeyStore.

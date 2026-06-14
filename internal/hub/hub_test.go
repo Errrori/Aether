@@ -89,7 +89,8 @@ func newMockAuth() *mockAuth {
 func (a *mockAuth) ValidateAPIKey(ctx context.Context, key string) (auth.KeyValidationResult, error) {
 	return auth.KeyValidationResult{Valid: true}, nil
 }
-func (a *mockAuth) InvalidateCache(keyHash string) {}
+func (a *mockAuth) InvalidateCache(keyHash string)                        {}
+func (a *mockAuth) CacheStats() (int64, int64)                            { return 0, 0 }
 func (a *mockAuth) ParseAndValidateToken(tokenString string) (*auth.Claims, error) { return nil, nil }
 func (a *mockAuth) IsChannelAuthorized(claims *auth.Claims, channel string) bool {
 	ok, exists := a.authorized[channel]
@@ -101,7 +102,7 @@ func (a *mockAuth) IsChannelAuthorized(claims *auth.Claims, channel string) bool
 
 // --- test helpers ---
 
-func newTestHub(t *testing.T) (*hubImpl, *mockStore) {
+func newTestHub(t testing.TB) (*hubImpl, *mockStore) {
 	t.Helper()
 	store := newMockStore()
 	auth := newMockAuth()
@@ -115,7 +116,7 @@ func newTestHub(t *testing.T) (*hubImpl, *mockStore) {
 	return h, store
 }
 
-func newTestConnection(t *testing.T, id string) *Connection {
+func newTestConnection(t testing.TB, id string) *Connection {
 	t.Helper()
 	return NewConnection(id, "sub-"+id, &auth.Claims{Subject: "sub-" + id, Channels: nil}, 16)
 }
