@@ -20,6 +20,7 @@ import (
 	"github.com/aether-mq/aether/internal/keymgmt"
 	"github.com/aether-mq/aether/internal/metrics"
 	"github.com/aether-mq/aether/internal/store"
+	"github.com/aether-mq/aether/internal/webhook"
 	"github.com/aether-mq/aether/internal/ws"
 )
 
@@ -92,14 +93,24 @@ func run() error {
 	wsm := ws.NewManager(h, au, cfg.WebSocket)
 	slog.Info("websocket manager ready")
 
-	// 9. HTTP API server.
+	// 9. Key management (v2).
 	km := keymgmt.New(ks)
+
+	// 9a. Webhook manager (v2 layer 2).
+	whStore, ok := st.(store.WebhookStore)
+	if !ok {
+		return fmt.Errorf("store does not implement WebhookStore")
+	}
+	whm := webhook.New(whStore, h, slog.Default())
+	slog.Info("webhook manager ready")
+
+	// 10. HTTP API server.
 	apiCfg := api.ServerConfig{
 		MaxPayloadSize: cfg.Server.MaxPayloadSize,
 	}
-	srv := api.New(h, au, st, km, ks, wsm, apiCfg)
+	srv := api.New(h, au, st, km, ks, whm, wsm, apiCfg)
 
-	// 10. Background tasks: eviction loop.
+	// 11. Background tasks: eviction loop.
 	evictCtx, evictCancel := context.WithCancel(context.Background())
 	defer evictCancel()
 
@@ -107,7 +118,7 @@ func run() error {
 	evictDone.Add(1)
 	go runEvictionLoop(evictCtx, st, cfg.Retention.EvictionInterval, &evictDone)
 
-	// 11. Start the HTTP server in a goroutine.
+	// 12. Start the HTTP server in a goroutine.
 	serverErr := make(chan error, 1)
 	go func() {
 		if cfg.Server.TLSCert != "" {

@@ -15,6 +15,7 @@ import (
 	"github.com/aether-mq/aether/internal/hub"
 	"github.com/aether-mq/aether/internal/keymgmt"
 	"github.com/aether-mq/aether/internal/store"
+	"github.com/aether-mq/aether/internal/webhook"
 )
 
 // --- mockHub ---
@@ -119,21 +120,23 @@ func newTestServer(t *testing.T) (*Server, *mockHub, *mockAuth, *mockStore) {
 	s := newMockStore()
 	km := newMockKeyManager()
 	ks := newMockKeyStore()
+	whm := newMockWebhookManager()
 	cfg := ServerConfig{MaxPayloadSize: 65536}
-	server := New(h, a, s, km, ks, nil, cfg)
+	server := New(h, a, s, km, ks, whm, nil, cfg)
 	return server, h, a, s
 }
 
-func newTestServerV2(t *testing.T) (*Server, *mockHub, *mockAuth, *mockStore, *mockKeyManager, *mockKeyStore) {
+func newTestServerV2(t *testing.T) (*Server, *mockHub, *mockAuth, *mockStore, *mockKeyManager, *mockKeyStore, *mockWebhookManager) {
 	t.Helper()
 	h := newMockHub()
 	a := newMockAuth()
 	s := newMockStore()
 	km := newMockKeyManager()
 	ks := newMockKeyStore()
+	whm := newMockWebhookManager()
 	cfg := ServerConfig{MaxPayloadSize: 65536}
-	server := New(h, a, s, km, ks, nil, cfg)
-	return server, h, a, s, km, ks
+	server := New(h, a, s, km, ks, whm, nil, cfg)
+	return server, h, a, s, km, ks, whm
 }
 
 func doRequest(t *testing.T, server *Server, method, path string, body io.Reader, headers map[string]string) *http.Response {
@@ -786,10 +789,67 @@ func (m *mockKeyStore) RotateAPIKey(ctx context.Context, id string, newHash, new
 	return nil
 }
 
+// --- mockWebhookManager ---
+
+type mockWebhookManager struct {
+	webhooks map[string]*webhook.WebhookMeta
+}
+
+func newMockWebhookManager() *mockWebhookManager {
+	return &mockWebhookManager{webhooks: make(map[string]*webhook.WebhookMeta)}
+}
+
+func (m *mockWebhookManager) CreateWebhook(ctx context.Context, name, channelTemplate, keyID string) (*webhook.CreatedWebhook, error) {
+	id := "wh-test-id"
+	now := time.Now()
+	meta := webhook.WebhookMeta{
+		ID: id, Name: name, ChannelTemplate: channelTemplate,
+		KeyID: keyID, Active: true, CreatedAt: now, UpdatedAt: now,
+	}
+	m.webhooks[id] = &meta
+	return &webhook.CreatedWebhook{Webhook: meta, Secret: "secret-hex-string"}, nil
+}
+
+func (m *mockWebhookManager) ListWebhooks(ctx context.Context) ([]webhook.WebhookMeta, error) {
+	var out []webhook.WebhookMeta
+	for _, wh := range m.webhooks {
+		out = append(out, *wh)
+	}
+	return out, nil
+}
+
+func (m *mockWebhookManager) GetWebhook(ctx context.Context, id string) (*webhook.WebhookMeta, error) {
+	wh, ok := m.webhooks[id]
+	if !ok {
+		return nil, store.ErrWebhookNotFound
+	}
+	return wh, nil
+}
+
+func (m *mockWebhookManager) DeleteWebhook(ctx context.Context, id string) error {
+	if _, ok := m.webhooks[id]; !ok {
+		return store.ErrWebhookNotFound
+	}
+	delete(m.webhooks, id)
+	return nil
+}
+
+func (m *mockWebhookManager) RotateSecret(ctx context.Context, id string) (*webhook.CreatedWebhook, error) {
+	wh, ok := m.webhooks[id]
+	if !ok {
+		return nil, store.ErrWebhookNotFound
+	}
+	return &webhook.CreatedWebhook{Webhook: *wh, Secret: "new-secret"}, nil
+}
+
+func (m *mockWebhookManager) ReceiveWebhook(ctx context.Context, urlToken string, body []byte, signature string) (*webhook.DeliveryResult, error) {
+	return &webhook.DeliveryResult{SeqID: 1, Channel: "test.ch", Timestamp: time.Now()}, nil
+}
+
 // --- tests: v2 keys ---
 
 func TestCreateKey_Success(t *testing.T) {
-	server, _, _, _, _, _ := newTestServerV2(t)
+	server, _, _, _, _, _ , _ := newTestServerV2(t)
 
 	body := strings.NewReader(`{"name":"my-key","publish":["orders.*"],"subscribe":["*"],"admin":false}`)
 	resp := doRequest(t, server, "POST", "/api/v2/keys", body, map[string]string{
@@ -813,7 +873,7 @@ func TestCreateKey_Success(t *testing.T) {
 }
 
 func TestCreateKey_DuplicateName(t *testing.T) {
-	server, _, _, _, km, _ := newTestServerV2(t)
+	server, _, _, _, km, _ , _ := newTestServerV2(t)
 	km.createErr = store.ErrAPIKeyDuplicateName
 
 	body := strings.NewReader(`{"name":"dup","publish":[],"subscribe":[],"admin":false}`)
@@ -832,7 +892,7 @@ func TestCreateKey_DuplicateName(t *testing.T) {
 }
 
 func TestCreateKey_MissingName(t *testing.T) {
-	server, _, _, _, _, _ := newTestServerV2(t)
+	server, _, _, _, _, _ , _ := newTestServerV2(t)
 
 	body := strings.NewReader(`{"publish":[],"subscribe":[],"admin":false}`)
 	resp := doRequest(t, server, "POST", "/api/v2/keys", body, map[string]string{
@@ -845,7 +905,7 @@ func TestCreateKey_MissingName(t *testing.T) {
 }
 
 func TestCreateKey_WithExpiresIn(t *testing.T) {
-	server, _, _, _, _, _ := newTestServerV2(t)
+	server, _, _, _, _, _ , _ := newTestServerV2(t)
 
 	body := strings.NewReader(`{"name":"expiring","publish":[],"subscribe":[],"admin":false,"expires_in":"24h"}`)
 	resp := doRequest(t, server, "POST", "/api/v2/keys", body, map[string]string{
@@ -858,7 +918,7 @@ func TestCreateKey_WithExpiresIn(t *testing.T) {
 }
 
 func TestCreateKey_Unauthorized(t *testing.T) {
-	server, _, _, _, _, _ := newTestServerV2(t)
+	server, _, _, _, _, _ , _ := newTestServerV2(t)
 
 	body := strings.NewReader(`{"name":"no-auth","publish":[],"subscribe":[],"admin":false}`)
 	resp := doRequest(t, server, "POST", "/api/v2/keys", body, map[string]string{
@@ -871,7 +931,7 @@ func TestCreateKey_Unauthorized(t *testing.T) {
 }
 
 func TestCreateKey_NotAdmin(t *testing.T) {
-	server, _, a, _, _, _ := newTestServerV2(t)
+	server, _, a, _, _, _ , _ := newTestServerV2(t)
 	// Add a key that is valid but not admin.
 	a.validAPIKeys["non-admin"] = false
 
@@ -891,7 +951,7 @@ func TestCreateKey_NotAdmin(t *testing.T) {
 }
 
 func TestListKeys_Success(t *testing.T) {
-	server, _, _, _, _, _ := newTestServerV2(t)
+	server, _, _, _, _, _ , _ := newTestServerV2(t)
 
 	resp := doRequest(t, server, "GET", "/api/v2/keys", nil, map[string]string{
 		"Authorization": "Bearer valid-key",
@@ -910,7 +970,7 @@ func TestListKeys_Success(t *testing.T) {
 }
 
 func TestListKeys_Empty(t *testing.T) {
-	server, _, _, _, _, _ := newTestServerV2(t)
+	server, _, _, _, _, _ , _ := newTestServerV2(t)
 
 	resp := doRequest(t, server, "GET", "/api/v2/keys", nil, map[string]string{
 		"Authorization": "Bearer valid-key",
@@ -922,7 +982,7 @@ func TestListKeys_Empty(t *testing.T) {
 }
 
 func TestListKeys_Unauthorized(t *testing.T) {
-	server, _, _, _, _, _ := newTestServerV2(t)
+	server, _, _, _, _, _ , _ := newTestServerV2(t)
 
 	resp := doRequest(t, server, "GET", "/api/v2/keys", nil, map[string]string{
 		"Authorization": "Bearer invalid-key",
@@ -934,7 +994,7 @@ func TestListKeys_Unauthorized(t *testing.T) {
 }
 
 func TestGetKey_Success(t *testing.T) {
-	server, _, _, _, km, _ := newTestServerV2(t)
+	server, _, _, _, km, _ , _ := newTestServerV2(t)
 	ck, _ := km.CreateKey(context.Background(), "get-test", store.KeyPermissions{}, nil)
 
 	resp := doRequest(t, server, "GET", "/api/v2/keys/"+ck.Meta.ID, nil, map[string]string{
@@ -954,7 +1014,7 @@ func TestGetKey_Success(t *testing.T) {
 }
 
 func TestGetKey_NotFound(t *testing.T) {
-	server, _, _, _, _, _ := newTestServerV2(t)
+	server, _, _, _, _, _ , _ := newTestServerV2(t)
 
 	resp := doRequest(t, server, "GET", "/api/v2/keys/nonexistent", nil, map[string]string{
 		"Authorization": "Bearer valid-key",
@@ -971,7 +1031,7 @@ func TestGetKey_NotFound(t *testing.T) {
 }
 
 func TestRevokeKey_Success(t *testing.T) {
-	server, _, _, _, km, ks := newTestServerV2(t)
+	server, _, _, _, km, ks , _ := newTestServerV2(t)
 	ck, _ := km.CreateKey(context.Background(), "revoke-test", store.KeyPermissions{}, nil)
 	ks.keys[ck.Meta.ID] = &store.APIKey{ID: ck.Meta.ID, KeyHash: "old-hash"}
 
@@ -985,7 +1045,7 @@ func TestRevokeKey_Success(t *testing.T) {
 }
 
 func TestRevokeKey_NotFound(t *testing.T) {
-	server, _, _, _, _, _ := newTestServerV2(t)
+	server, _, _, _, _, _ , _ := newTestServerV2(t)
 
 	resp := doRequest(t, server, "DELETE", "/api/v2/keys/nonexistent", nil, map[string]string{
 		"Authorization": "Bearer valid-key",
@@ -997,7 +1057,7 @@ func TestRevokeKey_NotFound(t *testing.T) {
 }
 
 func TestRotateKey_Success(t *testing.T) {
-	server, _, _, _, km, ks := newTestServerV2(t)
+	server, _, _, _, km, ks , _ := newTestServerV2(t)
 	ck, _ := km.CreateKey(context.Background(), "rotate-test", store.KeyPermissions{}, nil)
 	ks.keys[ck.Meta.ID] = &store.APIKey{ID: ck.Meta.ID, KeyHash: "old-hash"}
 
@@ -1018,7 +1078,7 @@ func TestRotateKey_Success(t *testing.T) {
 }
 
 func TestRotateKey_NotFound(t *testing.T) {
-	server, _, _, _, _, _ := newTestServerV2(t)
+	server, _, _, _, _, _ , _ := newTestServerV2(t)
 
 	resp := doRequest(t, server, "POST", "/api/v2/keys/nonexistent/rotate", nil, map[string]string{
 		"Authorization": "Bearer valid-key",
@@ -1026,5 +1086,370 @@ func TestRotateKey_NotFound(t *testing.T) {
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+// --- tests: batch publish ---
+
+func TestBatchPublish_Success(t *testing.T) {
+	server, h, _, _ := newTestServer(t)
+
+	body := strings.NewReader(`{"messages":[
+		{"channel":"test.ch1","payload":"data1"},
+		{"channel":"test.ch2","payload":{"msg":"hello"}}
+	]}`)
+	resp := doRequest(t, server, "POST", "/api/v2/publish/batch", body, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	json := readJSON(t, resp)
+	if json["ok"] != true {
+		t.Fatalf("expected ok=true, got %v", json["ok"])
+	}
+	results := json["results"].([]any)
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	for _, r := range results {
+		result := r.(map[string]any)
+		if result["status"] != "success" {
+			t.Fatalf("expected status=success, got %v", result["status"])
+		}
+		if result["seq_id"] != float64(h.seqID) {
+			t.Fatalf("expected seq_id=%d, got %v", h.seqID, result["seq_id"])
+		}
+	}
+}
+
+func TestBatchPublish_PartialError(t *testing.T) {
+	server, _, _, _ := newTestServer(t)
+
+	body := strings.NewReader(`{"messages":[
+		{"channel":"valid.ch","payload":"ok"},
+		{"channel":"bad*channel","payload":"fail"}
+	]}`)
+	resp := doRequest(t, server, "POST", "/api/v2/publish/batch", body, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	json := readJSON(t, resp)
+	results := json["results"].([]any)
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+
+	first := results[0].(map[string]any)
+	if first["status"] != "success" {
+		t.Fatalf("expected first message success, got %v", first["status"])
+	}
+
+	second := results[1].(map[string]any)
+	if second["status"] != "error" {
+		t.Fatalf("expected second message error, got %v", second["status"])
+	}
+	errObj := second["error"].(map[string]any)
+	if errObj["code"] != float64(ErrCodeInvalidChannel) {
+		t.Fatalf("expected error code %d, got %v", ErrCodeInvalidChannel, errObj["code"])
+	}
+}
+
+func TestBatchPublish_EmptyMessages(t *testing.T) {
+	server, _, _, _ := newTestServer(t)
+
+	body := strings.NewReader(`{"messages":[]}`)
+	resp := doRequest(t, server, "POST", "/api/v2/publish/batch", body, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+
+	json := readJSON(t, resp)
+	errObj := json["error"].(map[string]any)
+	if errObj["code"] != float64(ErrCodeBatchPublishEmpty) {
+		t.Fatalf("expected error code %d, got %v", ErrCodeBatchPublishEmpty, errObj["code"])
+	}
+}
+
+func TestBatchPublish_Unauthorized(t *testing.T) {
+	server, _, _, _ := newTestServer(t)
+
+	body := strings.NewReader(`{"messages":[{"channel":"ch","payload":"data"}]}`)
+	resp := doRequest(t, server, "POST", "/api/v2/publish/batch", body, map[string]string{
+		"Authorization": "Bearer invalid-key",
+	})
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestBatchPublish_MissingChannel(t *testing.T) {
+	server, _, _, _ := newTestServer(t)
+
+	body := strings.NewReader(`{"messages":[{"payload":"data"}]}`)
+	resp := doRequest(t, server, "POST", "/api/v2/publish/batch", body, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	json := readJSON(t, resp)
+	results := json["results"].([]any)
+	first := results[0].(map[string]any)
+	if first["status"] != "error" {
+		t.Fatalf("expected error status for missing channel")
+	}
+}
+
+func TestBatchPublish_MissingPayload(t *testing.T) {
+	server, _, _, _ := newTestServer(t)
+
+	body := strings.NewReader(`{"messages":[{"channel":"ch"}]}`)
+	resp := doRequest(t, server, "POST", "/api/v2/publish/batch", body, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	json := readJSON(t, resp)
+	results := json["results"].([]any)
+	first := results[0].(map[string]any)
+	if first["status"] != "error" {
+		t.Fatalf("expected error status for missing payload")
+	}
+}
+
+func TestBatchPublish_StorageFailure(t *testing.T) {
+	server, h, _, _ := newTestServer(t)
+	h.publishErr = fmt.Errorf("db down")
+
+	body := strings.NewReader(`{"messages":[{"channel":"ch","payload":"data"}]}`)
+	resp := doRequest(t, server, "POST", "/api/v2/publish/batch", body, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	json := readJSON(t, resp)
+	results := json["results"].([]any)
+	first := results[0].(map[string]any)
+	if first["status"] != "error" {
+		t.Fatalf("expected error status for storage failure")
+	}
+}
+
+// --- tests: webhook admin ---
+
+func TestCreateWebhook_Success(t *testing.T) {
+	server, _, _, _, _, _, _ := newTestServerV2(t)
+
+	body := strings.NewReader(`{"name":"my-wh","channel_template":"{event.repo}","key_id":"some-key"}`)
+	resp := doRequest(t, server, "POST", "/api/v2/webhooks", body, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	json := readJSON(t, resp)
+	if json["ok"] != true {
+		t.Fatalf("expected ok=true, got %v", json["ok"])
+	}
+	if json["secret"] == nil || json["secret"] == "" {
+		t.Fatal("expected non-empty secret")
+	}
+}
+
+func TestCreateWebhook_MissingName(t *testing.T) {
+	server, _, _, _, _, _, _ := newTestServerV2(t)
+
+	body := strings.NewReader(`{"channel_template":"{repo}","key_id":"k"}`)
+	resp := doRequest(t, server, "POST", "/api/v2/webhooks", body, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateWebhook_MissingChannelTemplate(t *testing.T) {
+	server, _, _, _, _, _, _ := newTestServerV2(t)
+
+	body := strings.NewReader(`{"name":"wh","key_id":"k"}`)
+	resp := doRequest(t, server, "POST", "/api/v2/webhooks", body, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateWebhook_Unauthorized(t *testing.T) {
+	server, _, _, _, _, _, _ := newTestServerV2(t)
+
+	body := strings.NewReader(`{"name":"wh","channel_template":"{x}","key_id":"k"}`)
+	resp := doRequest(t, server, "POST", "/api/v2/webhooks", body, map[string]string{
+		"Authorization": "Bearer invalid-key",
+	})
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateWebhook_NotAdmin(t *testing.T) {
+	server, _, a, _, _, _, _ := newTestServerV2(t)
+	a.validAPIKeys["non-admin"] = false
+
+	body := strings.NewReader(`{"name":"wh","channel_template":"{x}","key_id":"k"}`)
+	resp := doRequest(t, server, "POST", "/api/v2/webhooks", body, map[string]string{
+		"Authorization": "Bearer non-admin",
+	})
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", resp.StatusCode)
+	}
+}
+
+func TestListWebhooks_Success(t *testing.T) {
+	server, _, _, _, _, _, _ := newTestServerV2(t)
+
+	resp := doRequest(t, server, "GET", "/api/v2/webhooks", nil, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	json := readJSON(t, resp)
+	if json["webhooks"] == nil {
+		t.Fatal("expected webhooks field")
+	}
+}
+
+func TestGetWebhook_Success(t *testing.T) {
+	server, _, _, _, _, _, wm := newTestServerV2(t)
+	cw, _ := wm.CreateWebhook(context.Background(), "get-wh", "{repo}", "k1")
+
+	resp := doRequest(t, server, "GET", "/api/v2/webhooks/"+cw.Webhook.ID, nil, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	json := readJSON(t, resp)
+	if json["webhook"] == nil {
+		t.Fatal("expected webhook field")
+	}
+}
+
+func TestGetWebhook_NotFound(t *testing.T) {
+	server, _, _, _, _, _, _ := newTestServerV2(t)
+
+	resp := doRequest(t, server, "GET", "/api/v2/webhooks/nonexistent", nil, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+	json := readJSON(t, resp)
+	errObj := json["error"].(map[string]any)
+	if errObj["code"] != float64(ErrCodeWebhookNotFound) {
+		t.Fatalf("expected code %d, got %v", ErrCodeWebhookNotFound, errObj["code"])
+	}
+}
+
+func TestDeleteWebhook_Success(t *testing.T) {
+	server, _, _, _, _, _, wm := newTestServerV2(t)
+	cw, _ := wm.CreateWebhook(context.Background(), "del-wh", "{repo}", "k1")
+
+	resp := doRequest(t, server, "DELETE", "/api/v2/webhooks/"+cw.Webhook.ID, nil, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestDeleteWebhook_NotFound(t *testing.T) {
+	server, _, _, _, _, _, _ := newTestServerV2(t)
+
+	resp := doRequest(t, server, "DELETE", "/api/v2/webhooks/nonexistent", nil, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestRotateWebhookSecret_Success(t *testing.T) {
+	server, _, _, _, _, _, wm := newTestServerV2(t)
+	cw, _ := wm.CreateWebhook(context.Background(), "rot-wh", "{repo}", "k1")
+
+	resp := doRequest(t, server, "POST", "/api/v2/webhooks/"+cw.Webhook.ID+"/rotate-secret", nil, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	json := readJSON(t, resp)
+	if json["secret"] == nil || json["secret"] == "" {
+		t.Fatal("expected non-empty secret after rotation")
+	}
+	if json["secret"].(string) == cw.Secret {
+		t.Fatal("expected new secret to differ from old")
+	}
+}
+
+func TestRotateWebhookSecret_NotFound(t *testing.T) {
+	server, _, _, _, _, _, _ := newTestServerV2(t)
+
+	resp := doRequest(t, server, "POST", "/api/v2/webhooks/nonexistent/rotate-secret", nil, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestWebhookReceive_Success(t *testing.T) {
+	server, _, _, _, _, _, _ := newTestServerV2(t)
+
+	body := strings.NewReader(`{"event":{"repo":"foo/bar"}}`)
+	resp := doRequest(t, server, "POST", "/api/v2/webhooks/some-token", body, map[string]string{
+		"X-Signature-256": "abc123",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	json := readJSON(t, resp)
+	if json["ok"] != true {
+		t.Fatalf("expected ok=true, got %v", json["ok"])
 	}
 }
