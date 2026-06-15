@@ -49,34 +49,6 @@ var migrations = []migration{
 	);
 	CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys (key_hash);`,
 	},
-	{
-		Version: 4,
-		SQL: `CREATE TABLE IF NOT EXISTS webhooks (
-	    id               TEXT PRIMARY KEY,
-	    name             TEXT NOT NULL UNIQUE,
-	    url_token        TEXT NOT NULL UNIQUE,
-	    channel_template TEXT NOT NULL,
-	    secret           TEXT NOT NULL,
-	    key_id           TEXT NOT NULL REFERENCES api_keys(id),
-	    active           BOOLEAN NOT NULL DEFAULT true,
-	    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-	    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
-	);
-	CREATE TABLE IF NOT EXISTS webhook_deliveries (
-	    id              BIGSERIAL PRIMARY KEY,
-	    webhook_id      TEXT NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
-	    status          TEXT NOT NULL,
-	    response_code   INTEGER,
-	    error_message   TEXT,
-	    duration_ms     INTEGER NOT NULL,
-	    seq_id          BIGINT,
-	    channel         TEXT,
-	    idempotency_key TEXT,
-	    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-	);
-	CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook
-	    ON webhook_deliveries (webhook_id, created_at);`,
-	},
 }
 
 // RunMigrations creates the database schema if it does not exist.

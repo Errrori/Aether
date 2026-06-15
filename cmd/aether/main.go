@@ -93,7 +93,7 @@ func run() error {
 	wsm := ws.NewManager(h, au, cfg.WebSocket)
 	slog.Info("websocket manager ready")
 
-	// 9. Key management (v2).
+	// 9. Key management.
 	km := keymgmt.New(ks)
 
 	// 9a. Webhook manager (v2 layer 2).
@@ -110,7 +110,7 @@ func run() error {
 	}
 	srv := api.New(h, au, st, km, ks, whm, wsm, apiCfg)
 
-	// 11. Background tasks: eviction loop.
+	// 10. Background tasks: eviction loop.
 	evictCtx, evictCancel := context.WithCancel(context.Background())
 	defer evictCancel()
 
@@ -118,7 +118,7 @@ func run() error {
 	evictDone.Add(1)
 	go runEvictionLoop(evictCtx, st, cfg.Retention.EvictionInterval, &evictDone)
 
-	// 12. Start the HTTP server in a goroutine.
+	// 11. Start the HTTP server in a goroutine.
 	serverErr := make(chan error, 1)
 	go func() {
 		if cfg.Server.TLSCert != "" {

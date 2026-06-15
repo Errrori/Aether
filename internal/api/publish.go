@@ -96,15 +96,15 @@ type batchPublishMessage struct {
 
 type batchPublishResponse struct {
 	OK      bool                  `json:"ok"`
-	Results []batchMessageResult `json:"results"`
+	Results []batchMessageResult  `json:"results"`
 }
 
 type batchMessageResult struct {
-	Index     int    `json:"index"`
-	Status    string `json:"status"` // "success" | "error"
-	SeqID     int64  `json:"seq_id,omitempty"`
-	Timestamp string `json:"timestamp,omitempty"`
-	Error     *batchMessageError `json:"error,omitempty"`
+	Index     int                 `json:"index"`
+	Status    string              `json:"status"`
+	SeqID     int64               `json:"seq_id,omitempty"`
+	Timestamp string              `json:"timestamp,omitempty"`
+	Error     *batchMessageError  `json:"error,omitempty"`
 }
 
 type batchMessageError struct {

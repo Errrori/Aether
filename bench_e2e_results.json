@@ -1,0 +1,246 @@
+[
+  {
+    "name": "A - Max Concurrent Connections",
+    "duration_sec": 0,
+    "connections": 1206,
+    "publish_qps": 0,
+    "memory_mb": 33.558815002441406,
+    "cache_hit_rate_pct": 99.97563946406821,
+    "publish_latency": {
+      "min_ms": 0,
+      "max_ms": 0,
+      "avg_ms": 0,
+      "p50_ms": 0,
+      "p90_ms": 0,
+      "p99_ms": 0,
+      "p99_9_ms": 0,
+      "count": 0
+    },
+    "end_to_end_latency": {
+      "min_ms": 0,
+      "max_ms": 0,
+      "avg_ms": 0,
+      "p50_ms": 0,
+      "p90_ms": 0,
+      "p99_ms": 0,
+      "p99_9_ms": 0,
+      "count": 0
+    }
+  },
+  {
+    "name": "B-a: 1 channel + 1 subscriber",
+    "duration_sec": 0,
+    "connections": 1,
+    "publish_qps": 168.1,
+    "push_qps": 168.1,
+    "publish_latency": {
+      "min_ms": 3746500,
+      "max_ms": 18308400,
+      "avg_ms": 5899031,
+      "p50_ms": 5813600,
+      "p90_ms": 6907900,
+      "p99_ms": 8493240,
+      "p99_9_ms": 11677564,
+      "count": 1681
+    },
+    "end_to_end_latency": {
+      "min_ms": 3746400,
+      "max_ms": 18308300,
+      "avg_ms": 5940952,
+      "p50_ms": 5836400,
+      "p90_ms": 6957800,
+      "p99_ms": 8430600,
+      "p99_9_ms": 11845564,
+      "count": 1681
+    }
+  },
+  {
+    "name": "B-b: 1 channel + 100 subscribers",
+    "duration_sec": 0,
+    "connections": 100,
+    "publish_qps": 155.5,
+    "push_qps": 15540.8,
+    "publish_latency": {
+      "min_ms": 4004000,
+      "max_ms": 49804100,
+      "avg_ms": 6337437,
+      "p50_ms": 6122100,
+      "p90_ms": 7335140,
+      "p99_ms": 9331206,
+      "p99_9_ms": 45626074,
+      "count": 1555
+    },
+    "end_to_end_latency": {
+      "min_ms": 4004000,
+      "max_ms": 50529700,
+      "avg_ms": 6779983,
+      "p50_ms": 6543600,
+      "p90_ms": 7837900,
+      "p99_ms": 9907100,
+      "p99_9_ms": 50107700,
+      "count": 155408
+    }
+  },
+  {
+    "name": "B-c: 100 channels x 1 subscriber",
+    "duration_sec": 0,
+    "connections": 100,
+    "publish_qps": 173.7,
+    "push_qps": 173.7,
+    "publish_latency": {
+      "min_ms": 3989800,
+      "max_ms": 11504900,
+      "avg_ms": 5697169,
+      "p50_ms": 5582100,
+      "p90_ms": 6633460,
+      "p99_ms": 7878571,
+      "p99_9_ms": 10450928,
+      "count": 1737
+    },
+    "end_to_end_latency": {
+      "min_ms": 3989700,
+      "max_ms": 11504900,
+      "avg_ms": 5752789,
+      "p50_ms": 5691800,
+      "p90_ms": 6693980,
+      "p99_ms": 7781459,
+      "p99_9_ms": 10450855,
+      "count": 1737
+    }
+  },
+  {
+    "name": "B-d: 1 channel + 1000 subscribers",
+    "duration_sec": 0,
+    "connections": 1000,
+    "publish_qps": 92.9,
+    "push_qps": 92814.3,
+    "publish_latency": {
+      "min_ms": 6278700,
+      "max_ms": 18929000,
+      "avg_ms": 10688958,
+      "p50_ms": 10484200,
+      "p90_ms": 12543280,
+      "p99_ms": 15995400,
+      "p99_9_ms": 17962209,
+      "count": 929
+    },
+    "end_to_end_latency": {
+      "min_ms": 5410900,
+      "max_ms": 47707900,
+      "avg_ms": 12803782,
+      "p50_ms": 12601800,
+      "p90_ms": 16051000,
+      "p99_ms": 18674900,
+      "p99_9_ms": 21925800,
+      "count": 928143
+    }
+  },
+  {
+    "name": "",
+    "duration_sec": 0,
+    "connections": 500,
+    "publish_qps": 132.76,
+    "memory_mb": 23.263259887695312,
+    "publish_latency": {
+      "min_ms": 5271200,
+      "max_ms": 66584500,
+      "avg_ms": 8205151,
+      "p50_ms": 7976900,
+      "p90_ms": 9491700,
+      "p99_ms": 11878189,
+      "p99_9_ms": 15878831,
+      "count": 39827
+    },
+    "end_to_end_latency": {
+      "min_ms": 0,
+      "max_ms": 0,
+      "avg_ms": 0,
+      "p50_ms": 0,
+      "p90_ms": 0,
+      "p99_ms": 0,
+      "p99_9_ms": 0,
+      "count": 0
+    }
+  },
+  {
+    "name": "D - History Replay (100 msgs)",
+    "duration_sec": 0,
+    "publish_qps": 0,
+    "publish_latency": {
+      "min_ms": 0,
+      "max_ms": 0,
+      "avg_ms": 0,
+      "p50_ms": 0,
+      "p90_ms": 0,
+      "p99_ms": 0,
+      "p99_9_ms": 0,
+      "count": 0
+    },
+    "end_to_end_latency": {
+      "min_ms": 0,
+      "max_ms": 0,
+      "avg_ms": 0,
+      "p50_ms": 0,
+      "p90_ms": 0,
+      "p99_ms": 0,
+      "p99_9_ms": 0,
+      "count": 0
+    },
+    "history_replay_sec": 0.0257516,
+    "history_replay_msg_per_sec": 3883.253856071079
+  },
+  {
+    "name": "D - History Replay (500 msgs)",
+    "duration_sec": 0,
+    "publish_qps": 0,
+    "publish_latency": {
+      "min_ms": 0,
+      "max_ms": 0,
+      "avg_ms": 0,
+      "p50_ms": 0,
+      "p90_ms": 0,
+      "p99_ms": 0,
+      "p99_9_ms": 0,
+      "count": 0
+    },
+    "end_to_end_latency": {
+      "min_ms": 0,
+      "max_ms": 0,
+      "avg_ms": 0,
+      "p50_ms": 0,
+      "p90_ms": 0,
+      "p99_ms": 0,
+      "p99_9_ms": 0,
+      "count": 0
+    },
+    "history_replay_sec": 0.0128247,
+    "history_replay_msg_per_sec": 6861.758949527085
+  },
+  {
+    "name": "D - History Replay (1000 msgs)",
+    "duration_sec": 0,
+    "publish_qps": 0,
+    "publish_latency": {
+      "min_ms": 0,
+      "max_ms": 0,
+      "avg_ms": 0,
+      "p50_ms": 0,
+      "p90_ms": 0,
+      "p99_ms": 0,
+      "p99_9_ms": 0,
+      "count": 0
+    },
+    "end_to_end_latency": {
+      "min_ms": 0,
+      "max_ms": 0,
+      "avg_ms": 0,
+      "p50_ms": 0,
+      "p90_ms": 0,
+      "p99_ms": 0,
+      "p99_9_ms": 0,
+      "count": 0
+    },
+    "history_replay_sec": 0.01576,
+    "history_replay_msg_per_sec": 10850.2538071066
+  }
+]
