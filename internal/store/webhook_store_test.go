@@ -8,9 +8,26 @@ import (
 	"testing"
 )
 
+// seedAPIKey inserts a parent api_keys row, required by webhooks.key_id FK.
+func seedAPIKey(t *testing.T, s *pgStore) string {
+	t.Helper()
+	key := &APIKey{
+		ID:        "webhook-test-key",
+		Name:      "webhook-test-key",
+		KeyHash:   "webhook-test-key-hash",
+		KeyPrefix: "aek_wh_te",
+	}
+	if err := s.CreateAPIKey(context.Background(), key); err != nil {
+		t.Fatalf("seed api key: %v", err)
+	}
+	return key.ID
+}
+
 func TestCreateWebhook(t *testing.T) {
 	s := newTestStore(t)
 	truncateAll(t, s)
+
+	keyID := seedAPIKey(t, s)
 
 	wh := &Webhook{
 		ID:              "550e8400-e29b-41d4-a716-446655440001",
@@ -18,7 +35,7 @@ func TestCreateWebhook(t *testing.T) {
 		URLToken:        "abc123token",
 		ChannelTemplate: "{event.repo}",
 		Secret:          "my-secret",
-		KeyID:           "some-key-id",
+		KeyID:           keyID,
 		Active:          true,
 	}
 	if err := s.CreateWebhook(context.Background(), wh); err != nil {
@@ -33,9 +50,11 @@ func TestCreateWebhook_DuplicateName(t *testing.T) {
 	s := newTestStore(t)
 	truncateAll(t, s)
 
+	keyID := seedAPIKey(t, s)
+
 	wh1 := &Webhook{
 		ID: "w1-id", Name: "dup-name", URLToken: "tok1",
-		ChannelTemplate: "{x}", Secret: "s1", KeyID: "k1",
+		ChannelTemplate: "{x}", Secret: "s1", KeyID: keyID,
 	}
 	if err := s.CreateWebhook(context.Background(), wh1); err != nil {
 		t.Fatalf("CreateWebhook w1: %v", err)
@@ -43,7 +62,7 @@ func TestCreateWebhook_DuplicateName(t *testing.T) {
 
 	wh2 := &Webhook{
 		ID: "w2-id", Name: "dup-name", URLToken: "tok2",
-		ChannelTemplate: "{y}", Secret: "s2", KeyID: "k2",
+		ChannelTemplate: "{y}", Secret: "s2", KeyID: keyID,
 	}
 	err := s.CreateWebhook(context.Background(), wh2)
 	if !errors.Is(err, ErrWebhookNameConflict) {
@@ -55,9 +74,11 @@ func TestGetWebhook(t *testing.T) {
 	s := newTestStore(t)
 	truncateAll(t, s)
 
+	keyID := seedAPIKey(t, s)
+
 	wh := &Webhook{
 		ID: "get-wh-id", Name: "get-wh", URLToken: "get-tok",
-		ChannelTemplate: "{repo}", Secret: "sec", KeyID: "k1",
+		ChannelTemplate: "{repo}", Secret: "sec", KeyID: keyID,
 		Active: true,
 	}
 	if err := s.CreateWebhook(context.Background(), wh); err != nil {
@@ -93,9 +114,11 @@ func TestGetWebhookByURLToken(t *testing.T) {
 	s := newTestStore(t)
 	truncateAll(t, s)
 
+	keyID := seedAPIKey(t, s)
+
 	wh := &Webhook{
 		ID: "bytok-id", Name: "bytok", URLToken: "my-url-token",
-		ChannelTemplate: "{x}", Secret: "s", KeyID: "k",
+		ChannelTemplate: "{x}", Secret: "s", KeyID: keyID,
 		Active: true,
 	}
 	if err := s.CreateWebhook(context.Background(), wh); err != nil {
@@ -125,6 +148,8 @@ func TestListWebhooks(t *testing.T) {
 	s := newTestStore(t)
 	truncateAll(t, s)
 
+	keyID := seedAPIKey(t, s)
+
 	for i := 0; i < 3; i++ {
 		wh := &Webhook{
 			ID:              "list-" + string(rune('a'+i)),
@@ -132,7 +157,7 @@ func TestListWebhooks(t *testing.T) {
 			URLToken:        "tok-" + string(rune('a'+i)),
 			ChannelTemplate: "{x}",
 			Secret:          "sec",
-			KeyID:           "k",
+			KeyID:           keyID,
 			Active:          true,
 		}
 		if err := s.CreateWebhook(context.Background(), wh); err != nil {
@@ -166,9 +191,11 @@ func TestDeleteWebhook(t *testing.T) {
 	s := newTestStore(t)
 	truncateAll(t, s)
 
+	keyID := seedAPIKey(t, s)
+
 	wh := &Webhook{
 		ID: "del-id", Name: "del-wh", URLToken: "del-tok",
-		ChannelTemplate: "{x}", Secret: "s", KeyID: "k",
+		ChannelTemplate: "{x}", Secret: "s", KeyID: keyID,
 	}
 	if err := s.CreateWebhook(context.Background(), wh); err != nil {
 		t.Fatalf("CreateWebhook: %v", err)
@@ -198,9 +225,11 @@ func TestUpdateWebhookSecret(t *testing.T) {
 	s := newTestStore(t)
 	truncateAll(t, s)
 
+	keyID := seedAPIKey(t, s)
+
 	wh := &Webhook{
 		ID: "secret-id", Name: "secret-wh", URLToken: "secret-tok",
-		ChannelTemplate: "{x}", Secret: "old-secret", KeyID: "k",
+		ChannelTemplate: "{x}", Secret: "old-secret", KeyID: keyID,
 	}
 	if err := s.CreateWebhook(context.Background(), wh); err != nil {
 		t.Fatalf("CreateWebhook: %v", err)
@@ -233,9 +262,11 @@ func TestCreateDelivery(t *testing.T) {
 	s := newTestStore(t)
 	truncateAll(t, s)
 
+	keyID := seedAPIKey(t, s)
+
 	wh := &Webhook{
 		ID: "delivery-wh-id", Name: "delivery-wh", URLToken: "delivery-tok",
-		ChannelTemplate: "{x}", Secret: "sec", KeyID: "k",
+		ChannelTemplate: "{x}", Secret: "sec", KeyID: keyID,
 	}
 	if err := s.CreateWebhook(context.Background(), wh); err != nil {
 		t.Fatalf("CreateWebhook: %v", err)
@@ -265,9 +296,11 @@ func TestCreateDelivery_Failed(t *testing.T) {
 	s := newTestStore(t)
 	truncateAll(t, s)
 
+	keyID := seedAPIKey(t, s)
+
 	wh := &Webhook{
 		ID: "fail-wh-id", Name: "fail-wh", URLToken: "fail-tok",
-		ChannelTemplate: "{x}", Secret: "s", KeyID: "k",
+		ChannelTemplate: "{x}", Secret: "s", KeyID: keyID,
 	}
 	if err := s.CreateWebhook(context.Background(), wh); err != nil {
 		t.Fatalf("CreateWebhook: %v", err)
@@ -294,9 +327,11 @@ func TestListDeliveries(t *testing.T) {
 	s := newTestStore(t)
 	truncateAll(t, s)
 
+	keyID := seedAPIKey(t, s)
+
 	wh := &Webhook{
 		ID: "ld-wh-id", Name: "ld-wh", URLToken: "ld-tok",
-		ChannelTemplate: "{x}", Secret: "s", KeyID: "k",
+		ChannelTemplate: "{x}", Secret: "s", KeyID: keyID,
 	}
 	if err := s.CreateWebhook(context.Background(), wh); err != nil {
 		t.Fatalf("CreateWebhook: %v", err)
