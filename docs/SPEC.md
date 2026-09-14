@@ -310,6 +310,7 @@ DELETE FROM channels WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.cha
 | Prometheus histogram | v1 使用默认桶，v2 根据实际延迟分布调整 | 先跑起来再优化 |
 | 集成测试 | 真实 PostgreSQL（Docker） | mock 无法验证 SQL 正确性 |
 | WebSocket close 代码 | 缓冲区满: 1012，优雅关闭: 1001，Token 无效: HTTP 401（非 WS close） | PRD 已定义 |
+| HTTP 路由框架 | gin v1.12.0，仅限 internal/api | 19 条路由下手写注册/参数解析样板过多；框架限制在传输边界，Hub/Store/Auth/ws 保持零框架依赖；决策与行为差异见 docs/http-gin-migration.md |
 
 ## 7. v2 实现规格
 
