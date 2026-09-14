@@ -32,3 +32,5 @@ config.yaml
 # Environment files
 .env
 .env.*
+
+docs/project-analysis.md

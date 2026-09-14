@@ -13,6 +13,7 @@ import (
 	"github.com/aether-mq/aether/internal/auth"
 	"github.com/aether-mq/aether/internal/config"
 	"github.com/aether-mq/aether/internal/store"
+	"github.com/aether-mq/aether/internal/store/storetest"
 )
 
 // --- helpers ---
@@ -50,6 +51,10 @@ func integNewTestStore(t *testing.T) store.Store {
 
 	if err := st.RunMigrations(ctx); err != nil {
 		t.Fatalf("run migrations: %v", err)
+	}
+
+	if err := storetest.TruncateAll(ctx, testDSN()); err != nil {
+		t.Fatalf("truncate test tables: %v", err)
 	}
 	return st
 }
@@ -153,8 +158,14 @@ func TestIntegration_Publish_PersistsAndReturnsSeqID(t *testing.T) {
 	if result.Messages[0].SeqID != 1 {
 		t.Errorf("expected seq_id 1 in store, got %d", result.Messages[0].SeqID)
 	}
-	if string(result.Messages[0].Payload) != `{"msg":"hello"}` {
-		t.Errorf("expected payload 'hello', got %s", string(result.Messages[0].Payload))
+	// jsonb does not preserve the original text (e.g. it normalizes to
+	// {"msg": "hello"}), so compare semantically instead of byte-wise.
+	var got map[string]string
+	if err := json.Unmarshal(result.Messages[0].Payload, &got); err != nil {
+		t.Fatalf("unmarshal stored payload: %v", err)
+	}
+	if got["msg"] != "hello" {
+		t.Errorf("expected payload msg='hello', got %s", string(result.Messages[0].Payload))
 	}
 }
 

@@ -170,7 +170,9 @@ Error:    { "ok": false, "error": { "code": int, "message": string } }
 GET /api/v1/history?channel=<name>&after_seq=<n>&limit=<m>
 Authorization: Bearer <api_key>
 
-Success:  { "ok": true, "channel": string, "messages": [...], "has_more": bool }
+Success:  { "ok": true, "channel": string,
+            "messages": [{ "seq_id": int64, "timestamp": RFC3339, "payload": any }],
+            "has_more": bool }
 Error:    { "ok": false, "error": { "code": int, "message": string } }
 ```
 

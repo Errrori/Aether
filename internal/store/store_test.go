@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/aether-mq/aether/internal/config"
+	"github.com/aether-mq/aether/internal/store/storetest"
 )
 
 func testDSN() string {
@@ -60,7 +61,7 @@ func newTestStore(t *testing.T) *pgStore {
 func truncateAll(t *testing.T, s *pgStore) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := s.pool.Exec(ctx, `TRUNCATE webhook_deliveries, webhooks, api_keys, messages, channels RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := s.pool.Exec(ctx, storetest.TruncateStmt); err != nil {
 		t.Fatalf("truncate test tables: %v", err)
 	}
 }

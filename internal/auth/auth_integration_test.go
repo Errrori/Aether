@@ -5,6 +5,7 @@ package auth
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/aether-mq/aether/internal/config"
 	"github.com/aether-mq/aether/internal/store"

@@ -1,17 +1,25 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/aether-mq/aether/internal/store"
 )
 
+type historyMessage struct {
+	SeqID     int64           `json:"seq_id"`
+	Timestamp string          `json:"timestamp"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
 type historyResponse struct {
-	OK       bool            `json:"ok"`
-	Channel  string          `json:"channel"`
-	Messages []store.Message `json:"messages"`
-	HasMore  bool            `json:"has_more"`
+	OK       bool             `json:"ok"`
+	Channel  string           `json:"channel"`
+	Messages []historyMessage `json:"messages"`
+	HasMore  bool             `json:"has_more"`
 }
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
@@ -57,9 +65,11 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	messages := result.Messages
-	if messages == nil {
-		messages = []store.Message{}
+	messages := make([]historyMessage, len(result.Messages))
+	for i, m := range result.Messages {
+		// Same RFC3339 formatting as the publish response, so a message's
+		// timestamp reads identically across endpoints.
+		messages[i] = historyMessage{SeqID: m.SeqID, Timestamp: m.CreatedAt.Format(time.RFC3339), Payload: m.Payload}
 	}
 	hasMore := len(messages) >= limit
 

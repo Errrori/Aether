@@ -15,6 +15,7 @@ import (
 	"github.com/aether-mq/aether/internal/config"
 	"github.com/aether-mq/aether/internal/hub"
 	"github.com/aether-mq/aether/internal/store"
+	"github.com/aether-mq/aether/internal/store/storetest"
 	"github.com/coder/websocket"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -54,6 +55,10 @@ func integNewTestStore(t *testing.T) store.Store {
 
 	if err := st.RunMigrations(ctx); err != nil {
 		t.Fatalf("run migrations: %v", err)
+	}
+
+	if err := storetest.TruncateAll(ctx, testDSN()); err != nil {
+		t.Fatalf("truncate test tables: %v", err)
 	}
 	return st
 }
@@ -698,6 +703,73 @@ func TestIntegration_Shutdown_MultipleConnections(t *testing.T) {
 	}
 }
 
+// TestIntegration_Shutdown_UnresponsivePeerDoesNotBlockOthers pins the
+// graceful-shutdown guarantee: a peer that never reads cannot delay the
+// close frames of other connections or stall the manager. The client below
+// deliberately never calls Read, so the coder/websocket close handshake is
+// never answered and the server-side Close blocks until its 5s timeout.
+func TestIntegration_Shutdown_UnresponsivePeerDoesNotBlockOthers(t *testing.T) {
+	st := integNewTestStore(t)
+	a := integNewTestAuth(t, st.(store.KeyStore))
+	hubInst := integNewTestHub(t, st, a)
+	cfg := config.WebSocketConfig{
+		PingInterval:   30 * time.Second,
+		PongTimeout:    60 * time.Second,
+		OutboundBuffer: 256,
+		MaxMessageSize: 65536,
+		AllowedOrigins: []string{"*"},
+	}
+	mgr := NewManager(hubInst, a, cfg)
+	ts := httptest.NewServer(mgr)
+	defer ts.Close()
+
+	token := integGenerateToken(t, "sub", []string{"*"}, time.Hour)
+
+	// Unresponsive peer: no read is ever issued, so it will not answer the
+	// close handshake. Keep the handle only for cleanup via integDial.
+	integDial(t, ts, token)
+	conn := integDial(t, ts, token)
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		shutdownDone <- mgr.Shutdown(ctx)
+	}()
+
+	// Let Shutdown enter its close loop before probing it.
+	time.Sleep(200 * time.Millisecond)
+
+	// A concurrent request must be refused promptly. The old implementation
+	// ran the blocking close handshake while holding the manager lock, so this
+	// dial stalled until the unresponsive peer's 5s handshake timeout.
+	dialCtx, cancelDial := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelDial()
+	start := time.Now()
+	_, resp, err := websocket.Dial(dialCtx, integWSURL(ts.URL, token), nil)
+	dialElapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected dial rejection during shutdown")
+	}
+	if dialElapsed > 2*time.Second {
+		t.Fatalf("dial stalled for %v: manager lock was held by the unresponsive peer's close", dialElapsed)
+	}
+	if resp == nil || resp.StatusCode != 503 {
+		t.Fatalf("expected status 503, got %v", resp)
+	}
+
+	// The responsive peer must still receive its close frame promptly.
+	readCtx, cancelRead := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelRead()
+	if _, _, err := conn.Read(readCtx); websocket.CloseStatus(err) != websocket.StatusGoingAway {
+		t.Fatalf("expected close status 1001, got %v", err)
+	}
+
+	if err := <-shutdownDone; err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+}
+
 // --- heartbeat test ---
 
 func TestIntegration_Heartbeat_PingPong(t *testing.T) {
@@ -719,15 +791,59 @@ func TestIntegration_Heartbeat_PingPong(t *testing.T) {
 	token := integGenerateToken(t, "sub", []string{"*"}, time.Hour)
 	conn := integDial(t, ts, token)
 
+	// coder/websocket answers pings only while a read is in flight, so an
+	// idle client never pongs and the server drops it one pong timeout after
+	// its first ping. Pump incoming frames in the background for the whole
+	// test; assertions consume them from the channel. Stop the pump only at
+	// the end: cancelling an in-flight read closes the connection.
+	frames := make(chan map[string]any, 16)
+	readCtx, cancelRead := context.WithCancel(context.Background())
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			_, data, err := conn.Read(readCtx)
+			if err != nil {
+				return
+			}
+			var f map[string]any
+			if err := json.Unmarshal(data, &f); err != nil {
+				t.Errorf("unmarshal frame: %v", err)
+				continue
+			}
+			select {
+			case frames <- f:
+			case <-readCtx.Done():
+				return
+			}
+		}
+	}()
+	defer func() {
+		cancelRead()
+		<-readerDone
+	}()
+
+	waitFrame := func(timeout time.Duration) map[string]any {
+		select {
+		case f := <-frames:
+			return f
+		case <-time.After(timeout):
+			t.Fatalf("timed out waiting for frame after %v", timeout)
+			return nil
+		}
+	}
+
 	// Wait long enough for multiple ping/pong cycles
 	time.Sleep(600 * time.Millisecond)
 
 	// Connection should still be alive
-	integSubscribe(t, conn, []string{ch}, nil)
-	integPublish(t, hubInst, ch, json.RawMessage(`"after-ping"`))
+	integWriteJSON(t, conn, map[string]any{"type": "subscribe", "channels": []string{ch}})
+	if frame := waitFrame(5 * time.Second); frame["type"] != "subscribed" {
+		t.Fatalf("expected subscribed, got %v", frame["type"])
+	}
 
-	frame := integReadFrame(t, conn, 5*time.Second)
-	if frame["type"] != "message" {
+	integPublish(t, hubInst, ch, json.RawMessage(`"after-ping"`))
+	if frame := waitFrame(5 * time.Second); frame["type"] != "message" {
 		t.Fatalf("expected message, got %v", frame["type"])
 	}
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/aether-mq/aether/internal/config"
 	"github.com/aether-mq/aether/internal/store"
+	"github.com/aether-mq/aether/internal/store/storetest"
 )
 
 func testDSN() string {
@@ -46,6 +47,10 @@ func newTestStore(tb testing.TB) store.Store {
 
 	if err := st.RunMigrations(ctx); err != nil {
 		tb.Fatalf("run migrations: %v", err)
+	}
+
+	if err := storetest.TruncateAll(ctx, testDSN()); err != nil {
+		tb.Fatalf("truncate test tables: %v", err)
 	}
 
 	return st

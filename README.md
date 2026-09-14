@@ -214,9 +214,9 @@ curl -X POST http://localhost:8080/api/v1/publish \
 # 运行测试
 go test ./...
 
-# 集成测试（需要 Docker PostgreSQL）
+# 集成测试（需要 Docker PostgreSQL；-p 1 必填：各包共享同一测试库，并行会互相清空数据）
 docker compose -f docker-compose.test.yaml up -d
-go test -tags=integration -count=1 ./internal/store/
+go test -tags=integration -p 1 -count=1 ./...
 
 # 代码检查
 go vet ./...

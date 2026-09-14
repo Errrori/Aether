@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/aether-mq/aether/internal/config"
+	"github.com/aether-mq/aether/internal/store/storetest"
 )
 
 func benchDSN() string {
@@ -55,7 +56,7 @@ func newBenchStore(b *testing.B) *pgStore {
 
 func truncateBench(b *testing.B, s *pgStore) {
 	b.Helper()
-	if _, err := s.pool.Exec(context.Background(), `TRUNCATE messages, channels RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := s.pool.Exec(context.Background(), storetest.TruncateStmt); err != nil {
 		b.Fatalf("truncate test tables: %v", err)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -19,6 +20,8 @@ import (
 	"github.com/aether-mq/aether/internal/hub"
 	"github.com/aether-mq/aether/internal/keymgmt"
 	"github.com/aether-mq/aether/internal/store"
+	"github.com/aether-mq/aether/internal/store/storetest"
+	"github.com/aether-mq/aether/internal/webhook"
 )
 
 // --- helpers ---
@@ -97,9 +100,19 @@ func integCreateTestAPIKey(t *testing.T, ks store.KeyStore, name string, perms s
 	return rawKey
 }
 
+func integTruncateAll(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := storetest.TruncateAll(ctx, testDSN()); err != nil {
+		t.Fatalf("truncate test tables: %v", err)
+	}
+}
+
 func integNewTestServer(t *testing.T) (*Server, store.Store, string) {
 	t.Helper()
 	st := integNewTestStore(t)
+	integTruncateAll(t)
 	ks := st.(store.KeyStore)
 	a := integNewTestAuth(t, ks)
 	km := keymgmt.New(ks)
@@ -111,7 +124,15 @@ func integNewTestServer(t *testing.T) (*Server, store.Store, string) {
 		HistoryLimit:            1000,
 	}, hub.NopMetrics())
 
-	srv := New(h, a, st, km, ks, nil, ServerConfig{MaxPayloadSize: 65536})
+	whStore, ok := st.(store.WebhookStore)
+	if !ok {
+		t.Fatal("test store does not implement store.WebhookStore")
+	}
+	whm := webhook.New(whStore, h, slog.Default())
+
+	// ws.Manager is nil: these tests exercise the HTTP API and do not
+	// register the /ws route.
+	srv := New(h, a, st, km, ks, whm, nil, ServerConfig{MaxPayloadSize: 65536})
 
 	adminKey := integCreateTestAPIKey(t, ks, "admin", store.KeyPermissions{
 		Publish:   []string{"*"},
@@ -156,7 +177,13 @@ func TestIntegration_Publish_Success(t *testing.T) {
 	if len(history.Messages) != 1 {
 		t.Fatalf("expected 1 message in history, got %d", len(history.Messages))
 	}
-	if string(history.Messages[0].Payload) != `{"msg":"hello"}` {
+	// jsonb normalizes the stored text (e.g. to {"msg": "hello"}), so
+	// compare semantically instead of byte-wise.
+	var got map[string]string
+	if err := json.Unmarshal(history.Messages[0].Payload, &got); err != nil {
+		t.Fatalf("unmarshal stored payload: %v", err)
+	}
+	if got["msg"] != "hello" {
 		t.Fatalf("unexpected payload: %s", string(history.Messages[0].Payload))
 	}
 }
@@ -341,6 +368,25 @@ func TestIntegration_History_Success(t *testing.T) {
 	}
 	if len(messages) != 3 {
 		t.Fatalf("expected 3 messages, got %d", len(messages))
+	}
+
+	// Anchor the wire contract (PRD 5.1): lowercase seq_id/timestamp/payload.
+	first, ok := messages[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected message object, got %T", messages[0])
+	}
+	if _, ok := first["seq_id"].(float64); !ok {
+		t.Errorf("expected lowercase seq_id field, got %v", first)
+	}
+	if _, ok := first["payload"]; !ok {
+		t.Errorf("expected lowercase payload field, got %v", first)
+	}
+	ts, ok := first["timestamp"].(string)
+	if !ok {
+		t.Fatalf("expected lowercase timestamp field, got %v", first)
+	}
+	if _, err := time.Parse(time.RFC3339, ts); err != nil {
+		t.Errorf("timestamp %q is not RFC3339: %v", ts, err)
 	}
 }
 
@@ -599,13 +645,13 @@ func TestIntegration_CreateKey_DuplicateName(t *testing.T) {
 	srv, _, adminKey := integNewTestServer(t)
 	authHeader := map[string]string{"Authorization": "Bearer " + adminKey}
 
-	body := strings.NewReader(fmt.Sprintf(`{"name":"int-dup-via-http-%s"}`, t.Name()))
-	resp1 := doRequest(t, srv, "POST", "/api/v2/keys", body, authHeader)
+	body := fmt.Sprintf(`{"name":"int-dup-via-http-%s"}`, t.Name())
+	resp1 := doRequest(t, srv, "POST", "/api/v2/keys", strings.NewReader(body), authHeader)
 	if resp1.StatusCode != http.StatusOK {
 		t.Fatalf("first create: expected 200, got %d", resp1.StatusCode)
 	}
 
-	resp := doRequest(t, srv, "POST", "/api/v2/keys", body, authHeader)
+	resp := doRequest(t, srv, "POST", "/api/v2/keys", strings.NewReader(body), authHeader)
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("expected 409, got %d", resp.StatusCode)
 	}

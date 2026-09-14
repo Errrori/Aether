@@ -28,9 +28,27 @@ type Manager struct {
 }
 
 type activeConn struct {
-	id     string
-	wsConn *websocket.Conn
-	hubCnn *hub.Connection
+	id        string
+	wsConn    *websocket.Conn
+	hubCnn    *hub.Connection
+	closeOnce sync.Once
+}
+
+// initiateClose starts the close handshake exactly once per connection.
+// Close performs a blocking handshake: it waits up to 5s for the peer's
+// reply and for the library's per-connection goroutines to finish. Run it on
+// its own goroutine so an unresponsive peer cannot delay other connections'
+// close frames.
+func (ac *activeConn) initiateClose() {
+	ac.closeOnce.Do(func() {
+		go func() {
+			// Errors are expected when the peer never replies or the
+			// connection is already gone; the conn's loops reclaim it.
+			if err := ac.wsConn.Close(websocket.StatusGoingAway, "server shutting down"); err != nil {
+				slog.Default().Debug("websocket close handshake", "err", err)
+			}
+		}()
+	})
 }
 
 // NewManager creates a Manager.
@@ -118,25 +136,33 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	m.draining = true
 	m.mu.Unlock()
 
+	// draining is set and wg.Add only happens under the same lock, so the
+	// wait group can only shrink from here: a single waiter suffices.
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
-		// Close any connections currently in the map. This runs in a loop
-		// because ServeHTTP may register new connections (that passed the
-		// draining check before it was set) in the time between the snapshot
-		// and these connections completing their upgrade.
+		// Snapshot connections under the lock, then initiate their close
+		// handshakes outside it. This runs in a loop because ServeHTTP may
+		// register new connections (that passed the draining check before it
+		// was set) in the time between the snapshot and these connections
+		// completing their upgrade.
 		m.mu.Lock()
+		conns := make([]*activeConn, 0, len(m.conns))
 		for _, ac := range m.conns {
-			ac.wsConn.Close(websocket.StatusGoingAway, "server shutting down")
+			conns = append(conns, ac)
 		}
 		m.mu.Unlock()
 
-		done := make(chan struct{})
-		go func() {
-			m.wg.Wait()
-			close(done)
-		}()
+		for _, ac := range conns {
+			ac.initiateClose()
+		}
 
 		select {
 		case <-done:

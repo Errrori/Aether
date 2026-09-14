@@ -11,6 +11,7 @@ import (
 
 	"github.com/aether-mq/aether/internal/config"
 	"github.com/aether-mq/aether/internal/store"
+	"github.com/aether-mq/aether/internal/store/storetest"
 )
 
 func testDSN() string {
@@ -46,6 +47,10 @@ func newTestKeyManager(t *testing.T) (KeyManager, store.KeyStore) {
 
 	if err := st.RunMigrations(ctx); err != nil {
 		t.Fatalf("run migrations: %v", err)
+	}
+
+	if err := storetest.TruncateAll(ctx, testDSN()); err != nil {
+		t.Fatalf("truncate test tables: %v", err)
 	}
 
 	ks, ok := st.(store.KeyStore)

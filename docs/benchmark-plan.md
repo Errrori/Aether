@@ -105,8 +105,8 @@ BenchmarkReadHistory/100-16           	   10000	    120000 ns/op	    8900 B/op	 
 ### 1.2 运行命令
 
 ```bash
-# 运行所有 benchmark（需要 PG）
-go test -bench=. -benchmem -benchtime=3s -count=3 ./internal/store/ ./internal/auth/ ./internal/hub/ 2>&1 | tee bench_results.txt
+# 运行所有 benchmark（需要 PG；-p 1 必填：各包共享同一测试库且会清库，并行会互相清数据）
+go test -bench=. -benchmem -benchtime=3s -count=3 -p 1 ./internal/store/ ./internal/auth/ ./internal/hub/ 2>&1 | tee bench_results.txt
 
 # 用 benchstat 做统计（先安装：go install golang.org/x/perf/cmd/benchstat@latest）
 benchstat bench_results.txt
@@ -309,7 +309,7 @@ kill $AETHER_PID
 ```
 1. 启动 docker compose -f docker-compose.test.yaml up -d
 2. 创建 benchmark 文件（3 个 bench_test.go）
-3. 跑微基准：go test -bench=. -benchmem -count=3 ./internal/store/ ./internal/auth/ ./internal/hub/
+3. 跑微基准：go test -bench=. -benchmem -count=3 -p 1 ./internal/store/ ./internal/auth/ ./internal/hub/
 4. 创建 cmd/bench/ 压测工具
 5. 启动 Aether → 跑场景 A/B/C → 停止 Aether
 6. 汇总数据到报告模板
