@@ -37,7 +37,7 @@ Phase 6  ws  (依赖 hub, auth) ────────────────
 |---|--------|
 | S-1 | `RunMigrations`：空库启动后自动创建 `schema_migrations`、`channels`、`messages` 表及索引；重复调用幂等 |
 | S-2 | 迁移版本：v1 = `schema_migrations` + `channels`，v2 = `messages` + 索引 |
-| S-3 | `WriteMessage`：单事务写入，`FOR UPDATE` 行锁保证并发安全，seq_id 每频道单调递增 |
+| S-3 | `WriteMessage`：单事务写入，`INSERT ... ON CONFLICT DO UPDATE` 行锁保证并发安全，seq_id 每频道单调递增 |
 | S-4 | `WriteMessage` 幂等：相同 `(channel, idempotency_key)` 返回首次 seq_id，不重复写入，不递增 seq |
 | S-5 | `WriteMessage`：idempotency_key 为空时不触发去重逻辑，正常写入 |
 | S-6 | `ReadHistory`：返回 `seq_id > afterSeq` 的消息，按 `seq_id ASC` 排序，limit 上限 1000 |
@@ -255,22 +255,23 @@ CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages (created_at);
 ### 5.2 WriteMessage 事务
 
 ```sql
--- Step 1: 确保频道存在
-INSERT INTO channels (name) VALUES ($1) ON CONFLICT (name) DO NOTHING;
+-- 确保频道存在、锁定行并读取当前序列号，单条语句原子完成。
+-- （v2 第3层前置修复：原 INSERT + SELECT ... FOR UPDATE 两步之间存在被
+--   驱逐循环的空频道清理删行的窗口，见 SPEC 7.4.6）
+INSERT INTO channels (name) VALUES ($1)
+ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+RETURNING current_seq;
 
--- Step 2: 锁定频道行并读取当前序列号
-SELECT current_seq FROM channels WHERE name = $1 FOR UPDATE;
-
--- Step 3: 插入消息（Go 侧计算 newSeq = current_seq + 1）
+-- 插入消息（Go 侧计算 newSeq = current_seq + 1）
 INSERT INTO messages (channel, seq_id, payload, idempotency_key)
 VALUES ($1, $2, $3, $4)
 ON CONFLICT (channel, idempotency_key) DO NOTHING
 RETURNING seq_id, created_at;
 
--- Step 3b: 若 RETURNING 为空（幂等冲突），查询已有消息
+-- 若 RETURNING 为空（幂等冲突），查询已有消息
 SELECT seq_id, created_at FROM messages WHERE channel = $1 AND idempotency_key = $2;
 
--- Step 4: 推进序列号（幂等冲突时跳过）
+-- 推进序列号（幂等冲突时跳过）
 UPDATE channels SET current_seq = current_seq + 1, updated_at = now() WHERE name = $1;
 ```
 

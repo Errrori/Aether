@@ -5,6 +5,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/aether-mq/aether/internal/config"
 	"github.com/aether-mq/aether/internal/store/storetest"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func testDSN() string {
@@ -25,17 +27,7 @@ func testDSN() string {
 
 func newTestStore(t *testing.T) *pgStore {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	dbCfg := &config.DatabaseConfig{
-		DSN:             testDSN(),
-		MaxOpenConns:    5,
-		MaxIdleConns:    2,
-		ConnMaxIdleTime: time.Minute,
-		ConnMaxLifetime: 5 * time.Minute,
-	}
-	retCfg := &config.RetentionConfig{
+	return newTestStoreWithRetention(t, &config.RetentionConfig{
 		DefaultTTL:      720 * time.Hour,
 		DefaultMaxCount: 10000,
 		EvictionInterval: 5 * time.Minute,
@@ -43,6 +35,19 @@ func newTestStore(t *testing.T) *pgStore {
 			{Pattern: "alerts.*", TTL: 24 * time.Hour, MaxCount: 5000},
 			{Pattern: "shortlived", TTL: 1 * time.Hour, MaxCount: 100},
 		},
+	})
+}
+
+func newTestStoreWithRetention(t *testing.T, retCfg *config.RetentionConfig) *pgStore {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	dbCfg := &config.DatabaseConfig{
+		DSN:             testDSN(),
+		MaxOpenConns:    10,
+		ConnMaxIdleTime: time.Minute,
+		ConnMaxLifetime: 5 * time.Minute,
 	}
 
 	st, err := New(ctx, dbCfg, retCfg)
@@ -433,5 +438,172 @@ func TestPing(t *testing.T) {
 
 	if err := s.Ping(context.Background()); err != nil {
 		t.Fatalf("Ping: %v", err)
+	}
+}
+
+// --- SPEC 7.4.6: empty-channel cleanup must not fail concurrent publishes ---
+
+func TestWriteMessage_EvictPublishRace(t *testing.T) {
+	// 1ms TTL makes every published message immediately evictable, so the
+	// eviction loop repeatedly empties and reclaims the channel row while
+	// publishers race against it.
+	retCfg := &config.RetentionConfig{
+		DefaultTTL:       time.Millisecond,
+		DefaultMaxCount:  10000,
+		EvictionInterval: time.Minute,
+	}
+	s := newTestStoreWithRetention(t, retCfg)
+	truncateAll(t, s)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var evictWG sync.WaitGroup
+	var evictMu sync.Mutex
+	var evictErr error
+	var totalEvicted int
+	evictWG.Add(1)
+	go func() {
+		defer evictWG.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Millisecond):
+			}
+			_, evicted, err := s.EvictExpiredMessages(ctx)
+			if err != nil && ctx.Err() == nil {
+				evictMu.Lock()
+				if evictErr == nil {
+					evictErr = err
+				}
+				evictMu.Unlock()
+				return
+			}
+			if evicted > 0 {
+				evictMu.Lock()
+				totalEvicted += evicted
+				evictMu.Unlock()
+			}
+		}
+	}()
+
+	const workers = 8
+	const perWorker = 500
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+	success := 0
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perWorker; i++ {
+				if _, _, err := s.WriteMessage(context.Background(), "race.evict", json.RawMessage(`{"n":1}`), nil); err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					mu.Unlock()
+					return
+				}
+				mu.Lock()
+				success++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	cancel()
+	evictWG.Wait()
+
+	if firstErr != nil {
+		t.Fatalf("publish failed while eviction ran concurrently: %v", firstErr)
+	}
+	if want := workers * perWorker; success != want {
+		t.Fatalf("expected %d successful publishes, got %d", want, success)
+	}
+	if evictErr != nil {
+		t.Fatalf("concurrent eviction failed: %v", evictErr)
+	}
+	if totalEvicted == 0 {
+		t.Fatal("eviction evicted no messages; the race scenario was not exercised")
+	}
+}
+
+func TestWriteMessage_ChannelRecreatedAfterEviction(t *testing.T) {
+	retCfg := &config.RetentionConfig{
+		DefaultTTL:       10 * time.Millisecond,
+		DefaultMaxCount:  10000,
+		EvictionInterval: time.Minute,
+	}
+	s := newTestStoreWithRetention(t, retCfg)
+	truncateAll(t, s)
+	ctx := context.Background()
+
+	seq1, _, err := s.WriteMessage(ctx, "recreate.test", json.RawMessage(`{"v":1}`), nil)
+	if err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+	if seq1 != 1 {
+		t.Fatalf("expected first seq 1, got %d", seq1)
+	}
+
+	// Let the message expire, then run eviction: TTL delete removes the last
+	// message and the empty-channel cleanup reclaims the channel row.
+	time.Sleep(20 * time.Millisecond)
+	if _, _, err := s.EvictExpiredMessages(ctx); err != nil {
+		t.Fatalf("eviction: %v", err)
+	}
+
+	var count int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM channels WHERE name = $1`, "recreate.test").Scan(&count); err != nil {
+		t.Fatalf("query channel row: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected channel row reclaimed by eviction, got %d rows", count)
+	}
+
+	// Publishing after the reclaim must succeed and start a new incarnation.
+	seq2, _, err := s.WriteMessage(ctx, "recreate.test", json.RawMessage(`{"v":2}`), nil)
+	if err != nil {
+		t.Fatalf("publish after channel reclaim: %v", err)
+	}
+	if seq2 != 1 {
+		t.Fatalf("expected seq to restart at 1 after channel reclaim, got %d", seq2)
+	}
+
+	hist, err := s.ReadHistory(ctx, "recreate.test", 0, 100)
+	if err != nil {
+		t.Fatalf("read history: %v", err)
+	}
+	if len(hist.Messages) != 1 || hist.Messages[0].SeqID != 1 {
+		t.Fatalf("expected exactly the new incarnation message, got %+v", hist.Messages)
+	}
+}
+
+func TestWriteMessage_InvalidPayloadRollsBack(t *testing.T) {
+	s := newTestStore(t)
+	truncateAll(t, s)
+	ctx := context.Background()
+
+	_, _, err := s.WriteMessage(ctx, "rollback.test", json.RawMessage(`{"broken":`), nil)
+	if err == nil {
+		t.Fatal("expected invalid JSON payload to fail, got nil error")
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "22P02" {
+		t.Fatalf("expected invalid-JSON SQLSTATE 22P02, got: %v", err)
+	}
+
+	var count int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM channels WHERE name = $1`, "rollback.test").Scan(&count); err != nil {
+		t.Fatalf("query channel row: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected channel row rolled back with the failed insert, got %d rows", count)
 	}
 }
