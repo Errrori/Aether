@@ -590,7 +590,6 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 | `internal/store` | 扩展：迁移 v5（`origin_node`）、事务内通知发射、通知载荷编解码、`ReadMessage`/`LatestSeq`、驱逐 leader 锁、空频道清理竞态修复（7.4.6） |
 | `internal/hub` | 扩展：节点级投递游标，新增 `HasSubscribers` / `DeliverRemote` / `CatchUp` 方法（不改动现有 `hub.Hub` 接口） |
 | `internal/config` | 扩展：`cluster` 配置节、校验、环境变量覆盖 |
-| `internal/metrics` | 扩展：实现 `cluster.Metrics` |
 | `cmd/aether` | 扩展：装配 `cluster.Listener`（`h.(cluster.Deliverer)` 断言）、goroutine 生命周期、驱逐循环 leader 化 |
 
 依赖方向：`cluster` 依赖 `store`（载荷解码）；`store` 不依赖 `cluster`。通知发射放在 store 的原因：`pg_notify` 必须与消息写入处于同一事务，事务所有权属于 store；向其他包暴露 `pgx.Tx` 会破坏存储层封装。`cluster.Deliverer` 由 hub 的实例方法结构匹配，hub 不需要反向依赖 cluster。
@@ -654,18 +653,10 @@ type Config struct {
     ReconnectMax  time.Duration // 默认 30s
 }
 
-type Metrics interface {
-    IncNotificationsReceived()
-    IncSkippedSelf()
-    IncSkippedNoSubscribers()
-    IncDeliverErrors()
-    IncCatchUpMessages(n int)
-    SetConnected(connected bool)
-}
-
 // Run 阻塞运行直到 ctx 取消；内部处理建连、LISTEN、重连退避与追赶触发。
+// 异常与降级路径通过 slog 记录（断连 WARN、重连 INFO、投递失败 WARN）。
 // 连接使用 application_name = "aether-cluster-<node_id>"（截断 63 字节），便于运维与测试定向定位。
-func New(cfg Config, d Deliverer, m Metrics, logger *slog.Logger) *Listener
+func New(cfg Config, d Deliverer, logger *slog.Logger) *Listener
 func (l *Listener) Run(ctx context.Context) error
 ```
 
@@ -683,7 +674,7 @@ func (l *Listener) Run(ctx context.Context) error
 
 **追赶（LISTEN 断连恢复）**：对每个有本地订阅者的频道，anchor = 当前游标，分批 `ReadHistory`（每批 ≤ 1000，循环至短批，批间检查 `ctx.Err()`）；逐条处理——`Origin == 本节点` 的行跳过（发布时已内联投递过，据此精确去重），其余投递；每批结束后游标推进到批内最大 seq。若 `MinSeq > anchor+1`（保留窗口已越过），向该频道各连接发送 gap 帧（requested_from = 连接自身游标（如有）否则 anchor，available_from = MinSeq；复用既有语义，不新增帧类型）。
 
-**失败处理**：回读返回 `ErrMessageNotFound`（消息已被驱逐）→ 记录 WARN + 指标，跳过该条，不中断循环；LISTEN 连接断开 → 记录 WARN + `aether_cluster_connected=0`，按退避（1s 起，上限 30s）重连后重新 LISTEN + 追赶；本节点发布与本地投递不依赖 LISTEN 连接，重连期间不受影响。
+**失败处理**：回读返回 `ErrMessageNotFound`（消息已被驱逐）→ 记录 WARN，跳过该条，不中断循环；LISTEN 连接断开 → 记录 WARN，按退避（1s 起，上限 30s）重连后重新 LISTEN + 追赶，重连成功记 INFO；本节点发布与本地投递不依赖 LISTEN 连接，重连期间不受影响。无订阅者跳过为高频正常路径，不记日志。
 
 **顺序语义（文档化边界）**：跨节点场景下，本地发布的内联投递可能先于仍在通知队列中的更早远端消息到达订阅者（乱序但不丢失）；同一节点的并发发布在 v1 已存在同类现象。客户端应以 `seq_id` 排序/去重，协议不承诺跨节点严格全序。
 
@@ -725,19 +716,18 @@ RETURNING current_seq;
 |---|--------|
 | CL-1 | `cluster.enabled: false`：不建立 LISTEN 连接、写入路径无 `pg_notify`；全部既有测试零修改通过（回归） |
 | CL-2 | 端到端跨节点扇出：同进程构造 Node A / Node B（共享同一 PG），A 的发布在 1s 内投递到 B 的本地订阅者，消息内容与 seq_id 与存储一致 |
-| CL-3 | 通知载荷仅含 `node_id/channel/seq_id`，不含消息体；接收节点无该频道订阅者时跳过回读（以指标计数验证） |
+| CL-3 | 通知载荷仅含 `node_id/channel/seq_id`，不含消息体；接收节点无该频道订阅者时不触发回读（以 fake Deliverer 断言 `DeliverRemote` 未被调用） |
 | CL-4 | 通知与写入同事务：写入失败/回滚不产生通知；幂等命中（重复 idempotency_key）不产生通知；集群模式写入的消息带 `origin_node`，单节点模式为 NULL |
-| CL-5 | 自身去重：Node A 不因自己的通知二次投递，A 的本地订阅者每条消息恰好收到一次 |
-| CL-6 | 回读失败（消息已驱逐 → `ErrMessageNotFound`）记录 WARN + 指标并继续处理后续通知，不中断监听循环 |
-| CL-7 | LISTEN 连接断开后按退避（1s→30s）自动重连并重新 LISTEN；`aether_cluster_connected` 指标反映状态；重连期间本节点发布与本地投递不受影响 |
+| CL-5 | 自身去重：Node A 不因自己的通知二次投递（fake Deliverer 断言未调用），A 的本地订阅者每条消息恰好收到一次 |
+| CL-6 | 回读失败（消息已驱逐 → `ErrMessageNotFound`）记录 WARN 并继续处理后续通知，不中断监听循环 |
+| CL-7 | LISTEN 连接断开后按退避（1s→30s）自动重连并重新 LISTEN 成功；重连期间本节点发布与本地投递不受影响 |
 | CL-8 | 重连追赶：重连后对本地有订阅者的频道从节点游标分批补投；`origin = 本节点` 的消息精确跳过（发布时已内联投递），不产生重复投递；游标早于保留窗口（`MinSeq > 游标+1`）时相关连接收到 gap 帧 |
 | CL-9 | 多节点并发发布同一频道：seq 全局无重复无空洞；每个订阅者收到的 seq 集合完整（无重无漏）；不承诺严格升序（乱序为文档化边界，见 7.4.4） |
 | CL-10 | 驱逐 leader：两个 store 实例同时尝试，仅一个获得锁并执行驱逐，另一个跳过本轮；锁在周期结束或异常路径释放 |
 | CL-11 | 竞态修复：并发驱逐与发布的压力用例下，1000 次发布无 50301（集成测试，真实 PG） |
 | CL-12 | 优雅关闭：停止顺序为 驱逐循环 → cluster.Listener → HTTP/WS；关闭后 goroutine 收敛（WaitGroup），不向已关闭资源投递 |
-| CL-13 | 指标：`aether_cluster_notifications_received_total`、`..._skipped_self_total`、`..._skipped_no_subscribers_total`、`..._deliver_errors_total`、`..._catchup_messages_total`（Counter）与 `aether_cluster_connected`（Gauge）在 `/metricsz` 可见 |
-| CL-14 | 配置：`cluster` 全字段默认值生效；环境变量覆盖覆盖"覆盖已有值"与"补全缺失值"两种场景；非法配置（reconnect_base <= 0、node_id 非法字符）启动报错 |
-| CL-15 | 集成测试使用真实 PostgreSQL（两个节点实例共享同库），不使用 mock 验证跨节点路径；`-p 1` 串行约定沿用 |
+| CL-13 | 配置：`cluster` 全字段默认值生效；环境变量覆盖覆盖"覆盖已有值"与"补全缺失值"两种场景；非法配置（reconnect_base <= 0、node_id 非法字符）启动报错 |
+| CL-14 | 集成测试使用真实 PostgreSQL（两个节点实例共享同库），不使用 mock 验证跨节点路径；`-p 1` 串行约定沿用 |
 
 #### 7.4.8 技术决策
 
@@ -758,7 +748,7 @@ RETURNING current_seq;
 
 #### 7.4.9 新增错误码
 
-无。集群为内部机制，不新增 HTTP 错误码；写入失败沿用 50301。`/healthz`、`/readyz` 语义不变——LISTEN 断开的降级状态通过 `aether_cluster_connected` 指标观测，不改变健康检查结果（本节点仍可正常服务本地订阅者与发布）。
+无。集群为内部机制，不新增 HTTP 错误码；写入失败沿用 50301。`/healthz`、`/readyz` 语义不变——LISTEN 断开的降级状态通过 WARN 日志观测，不改变健康检查结果（本节点仍可正常服务本地订阅者与发布）。
 
 ### 7.5 Presence（规格待细化，集群验收后补）
 
