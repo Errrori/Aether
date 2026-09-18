@@ -13,6 +13,8 @@ import (
 
 var apiKeyRegex = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
+var clusterNodeIDRegex = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
 // ChannelNameRegex matches valid channel names per PRD 3.1.6:
 // 1-128 chars, [a-zA-Z0-9_./-], no consecutive dots, no leading/trailing dots.
 var ChannelNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_/-](?:\.?[a-zA-Z0-9_/-]){0,127}$`)
@@ -22,6 +24,7 @@ type Config struct {
 	Database  DatabaseConfig  `yaml:"database"`
 	Auth      AuthConfig      `yaml:"auth"`
 	WebSocket WebSocketConfig `yaml:"websocket"`
+	Cluster   ClusterConfig   `yaml:"cluster"`
 	Retention RetentionConfig `yaml:"retention"`
 	Shutdown  ShutdownConfig  `yaml:"shutdown"`
 	Log       LogConfig       `yaml:"log"`
@@ -59,6 +62,15 @@ type WebSocketConfig struct {
 	OutboundBuffer int           `yaml:"outbound_buffer"`
 	MaxMessageSize int           `yaml:"max_message_size"`
 	AllowedOrigins []string      `yaml:"allowed_origins"`
+}
+
+// ClusterConfig controls multi-node mode. When disabled (default), no LISTEN
+// connection is established and the write path emits no notifications.
+type ClusterConfig struct {
+	Enabled       bool          `yaml:"enabled"`
+	NodeID        string        `yaml:"node_id"` // 空则启动时自动生成（随机 16 字节 hex）
+	ReconnectBase time.Duration `yaml:"reconnect_base"`
+	ReconnectMax  time.Duration `yaml:"reconnect_max"`
 }
 
 type RetentionRule struct {
@@ -103,6 +115,10 @@ func defaultConfig() *Config {
 			PongTimeout:    60 * time.Second,
 			OutboundBuffer: 256,
 			MaxMessageSize: 65536,
+		},
+		Cluster: ClusterConfig{
+			ReconnectBase: 1 * time.Second,
+			ReconnectMax:  30 * time.Second,
 		},
 		Retention: RetentionConfig{
 			DefaultTTL:      720 * time.Hour,
@@ -171,6 +187,11 @@ func applyEnvOverrides(cfg *Config) error {
 		{"AETHER_WEBSOCKET_PONG_TIMEOUT", &cfg.WebSocket.PongTimeout, "duration"},
 		{"AETHER_WEBSOCKET_OUTBOUND_BUFFER", &cfg.WebSocket.OutboundBuffer, "int"},
 		{"AETHER_WEBSOCKET_MAX_MESSAGE_SIZE", &cfg.WebSocket.MaxMessageSize, "int"},
+		// cluster
+		{"AETHER_CLUSTER_ENABLED", &cfg.Cluster.Enabled, "bool"},
+		{"AETHER_CLUSTER_NODE_ID", &cfg.Cluster.NodeID, "string"},
+		{"AETHER_CLUSTER_RECONNECT_BASE", &cfg.Cluster.ReconnectBase, "duration"},
+		{"AETHER_CLUSTER_RECONNECT_MAX", &cfg.Cluster.ReconnectMax, "duration"},
 		// retention
 		{"AETHER_RETENTION_DEFAULT_TTL", &cfg.Retention.DefaultTTL, "duration"},
 		{"AETHER_RETENTION_DEFAULT_MAX_COUNT", &cfg.Retention.DefaultMaxCount, "int"},
@@ -196,6 +217,12 @@ func applyEnvOverrides(cfg *Config) error {
 				return fmt.Errorf("invalid int for %s: %w", o.env, err)
 			}
 			*(o.target.(*int)) = v
+		case "bool":
+			v, err := strconv.ParseBool(val)
+			if err != nil {
+				return fmt.Errorf("invalid bool for %s: %w", o.env, err)
+			}
+			*(o.target.(*bool)) = v
 		case "duration":
 			v, err := time.ParseDuration(val)
 			if err != nil {
@@ -256,6 +283,18 @@ func (c *Config) Validate() error {
 		if origin != "*" && !strings.HasPrefix(origin, "http://") && !strings.HasPrefix(origin, "https://") {
 			return fmt.Errorf("websocket.allowed_origins: invalid origin %q (must be \"*\" or start with http:// or https://)", origin)
 		}
+	}
+
+	if c.Cluster.Enabled {
+		if c.Cluster.ReconnectBase <= 0 {
+			return fmt.Errorf("cluster.reconnect_base must be positive")
+		}
+		if c.Cluster.ReconnectBase > c.Cluster.ReconnectMax {
+			return fmt.Errorf("cluster.reconnect_base must be <= cluster.reconnect_max")
+		}
+	}
+	if c.Cluster.NodeID != "" && !clusterNodeIDRegex.MatchString(c.Cluster.NodeID) {
+		return fmt.Errorf("cluster.node_id must match [A-Za-z0-9_-]{1,64}")
 	}
 
 	if c.Retention.DefaultTTL <= 0 {

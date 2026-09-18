@@ -558,3 +558,218 @@ log:
 		t.Errorf("Log.Format = %q", cfg.Log.Format)
 	}
 }
+
+// --- v2 第3层：cluster 配置节 ---
+
+const clusterBaseYAML = `
+database:
+  dsn: "postgres://localhost/aether"
+auth:
+  jwt_signing_key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+`
+
+func TestLoad_ClusterDefaults(t *testing.T) {
+	path := writeTestConfig(t, clusterBaseYAML)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Cluster.Enabled {
+		t.Error("Cluster.Enabled = true, want false by default")
+	}
+	if cfg.Cluster.NodeID != "" {
+		t.Errorf("Cluster.NodeID = %q, want empty by default", cfg.Cluster.NodeID)
+	}
+	if cfg.Cluster.ReconnectBase != 1*time.Second {
+		t.Errorf("Cluster.ReconnectBase = %v, want 1s", cfg.Cluster.ReconnectBase)
+	}
+	if cfg.Cluster.ReconnectMax != 30*time.Second {
+		t.Errorf("Cluster.ReconnectMax = %v, want 30s", cfg.Cluster.ReconnectMax)
+	}
+}
+
+func TestLoad_ClusterEnvOverride(t *testing.T) {
+	path := writeTestConfig(t, clusterBaseYAML+`
+cluster:
+  enabled: false
+  node_id: "from-yaml"
+  reconnect_base: 5s
+  reconnect_max: 60s
+`)
+
+	t.Setenv("AETHER_CLUSTER_ENABLED", "true")
+	t.Setenv("AETHER_CLUSTER_NODE_ID", "node-a")
+	t.Setenv("AETHER_CLUSTER_RECONNECT_BASE", "2s")
+	t.Setenv("AETHER_CLUSTER_RECONNECT_MAX", "45s")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Cluster.Enabled {
+		t.Error("Cluster.Enabled not overridden to true")
+	}
+	if cfg.Cluster.NodeID != "node-a" {
+		t.Errorf("Cluster.NodeID = %q, want node-a", cfg.Cluster.NodeID)
+	}
+	if cfg.Cluster.ReconnectBase != 2*time.Second {
+		t.Errorf("Cluster.ReconnectBase = %v, want 2s", cfg.Cluster.ReconnectBase)
+	}
+	if cfg.Cluster.ReconnectMax != 45*time.Second {
+		t.Errorf("Cluster.ReconnectMax = %v, want 45s", cfg.Cluster.ReconnectMax)
+	}
+}
+
+func TestLoad_ClusterEnvFillsMissing(t *testing.T) {
+	path := writeTestConfig(t, clusterBaseYAML)
+
+	t.Setenv("AETHER_CLUSTER_ENABLED", "1")
+	t.Setenv("AETHER_CLUSTER_NODE_ID", "node-b")
+	t.Setenv("AETHER_CLUSTER_RECONNECT_BASE", "3s")
+	t.Setenv("AETHER_CLUSTER_RECONNECT_MAX", "20s")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Cluster.Enabled {
+		t.Error("Cluster.Enabled not filled from env")
+	}
+	if cfg.Cluster.NodeID != "node-b" {
+		t.Errorf("Cluster.NodeID = %q, want node-b", cfg.Cluster.NodeID)
+	}
+	if cfg.Cluster.ReconnectBase != 3*time.Second {
+		t.Errorf("Cluster.ReconnectBase = %v, want 3s", cfg.Cluster.ReconnectBase)
+	}
+	if cfg.Cluster.ReconnectMax != 20*time.Second {
+		t.Errorf("Cluster.ReconnectMax = %v, want 20s", cfg.Cluster.ReconnectMax)
+	}
+}
+
+func TestLoad_ClusterEnvOverrideInvalid(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     string
+		value   string
+		wantErr string
+	}{
+		{"invalid bool", "AETHER_CLUSTER_ENABLED", "notabool", "invalid bool for AETHER_CLUSTER_ENABLED"},
+		{"invalid duration", "AETHER_CLUSTER_RECONNECT_BASE", "soon", "invalid duration for AETHER_CLUSTER_RECONNECT_BASE"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTestConfig(t, clusterBaseYAML)
+			t.Setenv(tt.env, tt.value)
+
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want to contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoad_ClusterEnvDisableOverride(t *testing.T) {
+	path := writeTestConfig(t, clusterBaseYAML+`
+cluster:
+  enabled: true
+`)
+
+	t.Setenv("AETHER_CLUSTER_ENABLED", "false")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Cluster.Enabled {
+		t.Error("Cluster.Enabled not overridden to false")
+	}
+}
+
+func TestLoad_ClusterDisabledSkipsBackoffValidation(t *testing.T) {
+	path := writeTestConfig(t, clusterBaseYAML+`
+cluster:
+  enabled: false
+  reconnect_base: 0s
+`)
+
+	if _, err := Load(path); err != nil {
+		t.Fatalf("disabled cluster should skip backoff validation: %v", err)
+	}
+}
+
+func TestLoad_ClusterNodeIDBound(t *testing.T) {
+	t.Run("64 characters accepted", func(t *testing.T) {
+		id := strings.Repeat("a", 64)
+		path := writeTestConfig(t, clusterBaseYAML+"cluster:\n  node_id: \""+id+"\"\n")
+
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Cluster.NodeID != id {
+			t.Errorf("Cluster.NodeID = %q, want 64-char id", cfg.Cluster.NodeID)
+		}
+	})
+
+	t.Run("65 characters rejected", func(t *testing.T) {
+		id := strings.Repeat("a", 65)
+		path := writeTestConfig(t, clusterBaseYAML+"cluster:\n  node_id: \""+id+"\"\n")
+
+		_, err := Load(path)
+		if err == nil {
+			t.Fatal("expected error for 65-char node_id, got nil")
+		}
+		if !strings.Contains(err.Error(), "cluster.node_id must match") {
+			t.Errorf("error = %q, want node_id validation mention", err.Error())
+		}
+	})
+}
+
+func TestLoad_ClusterValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "reconnect_base non-positive when enabled",
+			yaml: `cluster:
+  enabled: true
+  reconnect_base: 0s`,
+			wantErr: "cluster.reconnect_base must be positive",
+		},
+		{
+			name: "reconnect_base exceeds max",
+			yaml: `cluster:
+  enabled: true
+  reconnect_base: 60s
+  reconnect_max: 10s`,
+			wantErr: "cluster.reconnect_base must be <= cluster.reconnect_max",
+		},
+		{
+			name: "node_id with invalid characters",
+			yaml: `cluster:
+  node_id: "bad id!"`,
+			wantErr: "cluster.node_id must match",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTestConfig(t, clusterBaseYAML+tt.yaml)
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want to contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
