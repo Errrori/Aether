@@ -587,7 +587,7 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 | 模块 | 变更 |
 |---|---|
 | `internal/cluster` | 新增：LISTEN 连接生命周期、通知解码、去重、投递回调、重连退避与追赶触发 |
-| `internal/store` | 扩展：事务内通知发射、通知载荷编解码、`ReadMessage`、驱逐 leader 锁、空频道清理竞态修复（7.4.6） |
+| `internal/store` | 扩展：迁移 v5（`origin_node`）、事务内通知发射、通知载荷编解码、`ReadMessage`/`LatestSeq`、驱逐 leader 锁、空频道清理竞态修复（7.4.6） |
 | `internal/hub` | 扩展：节点级投递游标，新增 `HasSubscribers` / `DeliverRemote` / `CatchUp` 方法（不改动现有 `hub.Hub` 接口） |
 | `internal/config` | 扩展：`cluster` 配置节、校验、环境变量覆盖 |
 | `internal/metrics` | 扩展：实现 `cluster.Metrics` |
@@ -619,15 +619,19 @@ var ErrMessageNotFound = errors.New("message not found")
 
 // Options 以变参传入 New，既有调用保持兼容。
 type Options struct {
-    NodeID string // 非空 = 集群模式（写入事务内 pg_notify）；空 = 单节点，无额外 SQL
+    NodeID string // 非空 = 集群模式：写入事务内 pg_notify 且为消息盖 origin_node 章；空 = 单节点，无额外 SQL
 }
 func New(ctx context.Context, dbCfg *config.DatabaseConfig, retCfg *config.RetentionConfig, opts ...Options) (Store, error)
 
 // Store 接口新增
 ReadMessage(ctx context.Context, channel string, seqID int64) (*Message, error)
+LatestSeq(ctx context.Context, channel string) (int64, error) // 频道当前最大 seq；频道不存在返回 0
+
+// Message 新增字段（ReadHistory 一并返回；单节点写入为 NULL/空）
+//   Origin string  // messages.origin_node：消息由哪个节点写入（迁移 v5）
 
 // LeaderStore 是可选接口（与 KeyStore / WebhookStore 同模式，main 中类型断言装配）。
-// TryEvictionLock 在专用连接上获取会话级 advisory lock；
+// TryEvictionLock 在专用连接（不走连接池，避免池回收静默释放会话锁）上获取会话级 advisory lock；
 // 返回 (nil, nil) 表示其他节点持有锁，本节点跳过本轮驱逐。
 type LeaderStore interface {
     TryEvictionLock(ctx context.Context) (*EvictionLock, error)
@@ -644,6 +648,7 @@ type Deliverer interface {
 }
 
 type Config struct {
+    DSN           string        // LISTEN 连接使用；由 main 注入 cfg.Database.DSN
     NodeID        string
     ReconnectBase time.Duration // 默认 1s
     ReconnectMax  time.Duration // 默认 30s
@@ -659,21 +664,28 @@ type Metrics interface {
 }
 
 // Run 阻塞运行直到 ctx 取消；内部处理建连、LISTEN、重连退避与追赶触发。
+// 连接使用 application_name = "aether-cluster-<node_id>"（截断 63 字节），便于运维与测试定向定位。
 func New(cfg Config, d Deliverer, m Metrics, logger *slog.Logger) *Listener
 func (l *Listener) Run(ctx context.Context) error
 ```
 
 #### 7.4.4 运行机制
 
-**发布路径（启用集群时）**：`hub.Publish → store.WriteMessage` 在同一事务内完成：确保频道 → 锁定频道行取 seq → 插入消息 → `SELECT pg_notify('aether_messages', $payload)` → 推进 current_seq → 提交。PG 保证通知在事务提交后才送达所有 LISTEN 者（回滚即丢弃）。本地扇出保持现状（提交后立即分发）。幂等命中与冲突分支不发送通知（无新消息）。
+**发布路径（启用集群时）**：`hub.Publish → store.WriteMessage` 在同一事务内完成：确保频道并取 seq → 插入消息（盖 `origin_node = 本节点`）→ `SELECT pg_notify('aether_messages', $payload)` → 推进 current_seq → 提交。PG 保证通知在事务提交后才送达所有 LISTEN 者（回滚即丢弃）。本地扇出保持现状（提交后立即内联分发）。幂等命中与冲突分支不发送通知（无新消息）。单节点（NodeID 为空）时无盖章、无通知。
 
 **接收路径**：`cluster.Listener` 独占一条专用 LISTEN 连接（pgx 单连接，不进连接池——LISTEN 是有状态会话），单 goroutine 串行消费：解码 → 自身通知按 NodeID 跳过 → `HasSubscribers` 为假跳过（无订阅者的节点不产生回读查询）→ `DeliverRemote` 回读并本地扇出。
 
-**启动/重连顺序（关键）**：建连 → `LISTEN` → `CatchUp` → 进入通知消费循环。先 LISTEN 后追赶保证追赶期间的新消息进入连接的通知队列，追赶结束后按序消费；`DeliverRemote` 对 `seq <= 节点游标` 的通知跳过，天然去除追赶与队列的重叠投递。
+**节点级投递游标（单写者 = 监听路径）**：hub 维护 `channel → 监听路径已处理的最大 seq`。关键不变量：**只有监听路径推进游标**（自身通知被处理时推进；远端通知投递后推进；`ErrMessageNotFound` 时仍推进——该 seq 不可再投递），**本地发布的内联投递不推进游标**。原因：内联投递可能先于仍在通知队列中的更早远端消息被投递，若它推进游标，队列中更早的消息会被误判为已处理而永久漏投（规划期发现的漏投窗口）。
 
-**节点级投递游标**：hub 维护 `channel → 已扇出最大 seq`，由全部投递路径推进（本地发布、远程投递、历史回放、追赶）。追赶即：对每个有本地订阅者的频道，从游标以 `ReadHistory` 分批读取直到追平；若保留窗口已越过游标（`MinSeq > 游标+1`），向该频道各连接发送 gap 帧（复用既有语义，不新增帧类型）。
+游标生命周期：频道出现首个订阅者时初始化为 `LatestSeq(频道)`（防止不设 `after_seq` 的订阅在重连追赶时被灌入整段历史）；最后一个订阅者离开（Unsubscribe / RemoveConnection）时删除游标项。
+
+**启动/重连顺序（关键）**：建连 → `LISTEN` → `CatchUp` → 进入通知消费循环。先 LISTEN 后追赶保证追赶期间的新消息进入连接的通知队列，追赶结束后按序消费，且与追赶内容不重复（游标去重）。
+
+**追赶（LISTEN 断连恢复）**：对每个有本地订阅者的频道，anchor = 当前游标，分批 `ReadHistory`（每批 ≤ 1000，循环至短批，批间检查 `ctx.Err()`）；逐条处理——`Origin == 本节点` 的行跳过（发布时已内联投递过，据此精确去重），其余投递；每批结束后游标推进到批内最大 seq。若 `MinSeq > anchor+1`（保留窗口已越过），向该频道各连接发送 gap 帧（requested_from = 连接自身游标（如有）否则 anchor，available_from = MinSeq；复用既有语义，不新增帧类型）。
 
 **失败处理**：回读返回 `ErrMessageNotFound`（消息已被驱逐）→ 记录 WARN + 指标，跳过该条，不中断循环；LISTEN 连接断开 → 记录 WARN + `aether_cluster_connected=0`，按退避（1s 起，上限 30s）重连后重新 LISTEN + 追赶；本节点发布与本地投递不依赖 LISTEN 连接，重连期间不受影响。
+
+**顺序语义（文档化边界）**：跨节点场景下，本地发布的内联投递可能先于仍在通知队列中的更早远端消息到达订阅者（乱序但不丢失）；同一节点的并发发布在 v1 已存在同类现象。客户端应以 `seq_id` 排序/去重，协议不承诺跨节点严格全序。
 
 **驱逐 leader**：`cluster.enabled` 时驱逐循环先尝试会话级 advisory lock（固定 key，专用连接持有，周期结束显式释放）。未获得锁的节点跳过本轮，保证同一时刻仅一个节点执行驱逐。
 
@@ -714,12 +726,12 @@ RETURNING current_seq;
 | CL-1 | `cluster.enabled: false`：不建立 LISTEN 连接、写入路径无 `pg_notify`；全部既有测试零修改通过（回归） |
 | CL-2 | 端到端跨节点扇出：同进程构造 Node A / Node B（共享同一 PG），A 的发布在 1s 内投递到 B 的本地订阅者，消息内容与 seq_id 与存储一致 |
 | CL-3 | 通知载荷仅含 `node_id/channel/seq_id`，不含消息体；接收节点无该频道订阅者时跳过回读（以指标计数验证） |
-| CL-4 | 通知与写入同事务：写入失败/回滚不产生通知；幂等命中（重复 idempotency_key）不产生通知 |
+| CL-4 | 通知与写入同事务：写入失败/回滚不产生通知；幂等命中（重复 idempotency_key）不产生通知；集群模式写入的消息带 `origin_node`，单节点模式为 NULL |
 | CL-5 | 自身去重：Node A 不因自己的通知二次投递，A 的本地订阅者每条消息恰好收到一次 |
 | CL-6 | 回读失败（消息已驱逐 → `ErrMessageNotFound`）记录 WARN + 指标并继续处理后续通知，不中断监听循环 |
 | CL-7 | LISTEN 连接断开后按退避（1s→30s）自动重连并重新 LISTEN；`aether_cluster_connected` 指标反映状态；重连期间本节点发布与本地投递不受影响 |
-| CL-8 | 重连追赶：重连后对本地有订阅者的频道从节点游标补投；游标早于保留窗口（`MinSeq > 游标+1`）时相关连接收到 gap 帧；追赶与队列通知不产生重复投递（游标去重） |
-| CL-9 | 多节点并发发布同一频道：seq 全局无重复无空洞；各节点按 seq 升序投递（游标单调） |
+| CL-8 | 重连追赶：重连后对本地有订阅者的频道从节点游标分批补投；`origin = 本节点` 的消息精确跳过（发布时已内联投递），不产生重复投递；游标早于保留窗口（`MinSeq > 游标+1`）时相关连接收到 gap 帧 |
+| CL-9 | 多节点并发发布同一频道：seq 全局无重复无空洞；每个订阅者收到的 seq 集合完整（无重无漏）；不承诺严格升序（乱序为文档化边界，见 7.4.4） |
 | CL-10 | 驱逐 leader：两个 store 实例同时尝试，仅一个获得锁并执行驱逐，另一个跳过本轮；锁在周期结束或异常路径释放 |
 | CL-11 | 竞态修复：并发驱逐与发布的压力用例下，1000 次发布无 50301（集成测试，真实 PG） |
 | CL-12 | 优雅关闭：停止顺序为 驱逐循环 → cluster.Listener → HTTP/WS；关闭后 goroutine 收敛（WaitGroup），不向已关闭资源投递 |
@@ -735,7 +747,10 @@ RETURNING current_seq;
 | 通知载荷 | 仅 `node_id/channel/seq_id` | `pg_notify` 载荷上限 8000B，Aether payload 上限 64KB，无法携带消息体；回读保证内容与存储一致 |
 | 通知发射位置 | store 写入事务内 | 事务内 NOTIFY 由 PG 保证"提交才送达、回滚即丢弃"；事务所有权在 store，避免跨包暴露 `pgx.Tx` |
 | 接收连接 | 专用单连接 + 单 goroutine 串行消费 | LISTEN 是有状态会话，不能随连接池复用；单 goroutine 天然保序，无需并发去重 |
-| 去重方式 | 通知携带 node_id + 节点级游标 | 自身通知按 node_id 跳过；跨路径（追赶/队列）重叠按游标去重 |
+| 去重方式 | 通知携带 node_id + 节点级游标 + `origin_node` 列 | 自身通知按 node_id 跳过；追赶/队列重叠按游标去重；`origin_node` 让追赶精确跳过本节点已内联投递的消息 |
+| 游标推进规则 | 仅监听路径推进，本地内联投递不推进 | 消除"内联投递越过队列中更早的远端消息"造成的永久漏投窗口（规划期发现的 R1 缺陷） |
+| 追赶去重依据 | `messages.origin_node`（迁移 v5，NULL = 单节点/历史） | 精确去重避免"补投风暴"；附带消息溯源能力（运维排查） |
+| 顺序语义 | 尽力有序，不承诺跨节点全序 | 乱序在 v1 并发发布已存在；严格全序需每频道投递定序器，复杂度不成比例 |
 | 断连兜底 | 重连 + 节点游标追赶 + 客户端 after_seq 回放 | NOTIFY 不持久化；三层兜底覆盖"LISTEN 闪断 → 节点重启 → 客户端离线" |
 | 驱逐并发 | 会话级 `pg_try_advisory_lock`（固定 key） | 避免 N 节点重复驱逐；会话锁绑定专用连接，周期结束显式释放 |
 | 接口扩展方式 | hub 新增方法（结构匹配 `cluster.Deliverer`），不改动 `hub.Hub` | 与 KeyStore / WebhookStore 的可选接口装配模式一致；不扩大 ws/api 的依赖契约 |

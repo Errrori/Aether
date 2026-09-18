@@ -7,7 +7,7 @@
 - **单节点现状**：`hub.Publish` 在 `store.WriteMessage` 提交后遍历**本进程**的订阅表分发（`internal/hub/publish.go`）。多节点部署时各节点只认识本进程的连接，跨节点订阅者收不到消息。
 - **写路径已多节点安全**：seq 由 DB 层分配（`channels.current_seq` + `FOR UPDATE` 行锁），全局有序、跨节点无冲突。本层不改动写路径的并发控制。
 - **方向已在 PRD 定调**：PRD 8.1 为 v2 集群模式选择 LISTEN/NOTIFY——多节点共享同一 PG，不引入 Redis 等中间件；PRD 路线图 2b 明确"利用 LISTEN/NOTIFY 实现跨节点扇出，节点发现"。
-- **已知缺陷**：`internal/store/evict.go` 的空频道清理与并发发布存在竞态（偶发 50301）。集群化会放大该竞态（N 个节点并发驱逐），作为前置修复并入本层（SPEC 7.4.6）。
+- **已知缺陷**：`internal/store/evict.go` 的空频道清理与并发发布存在竞态（偶发 50301）。集群化会放大该竞态（N 个节点并发驱逐），已作为本层前置修复交付（SPEC 7.4.6）。
 
 ## 2. 决策摘要
 
@@ -17,8 +17,10 @@
 | 通知载荷 | 仅 `{node_id, channel, seq_id}`，接收方按 seq 回读消息体 |
 | 通知发射位置 | 写入事务内（`SELECT pg_notify(...)`），与消息插入同事务提交 |
 | 接收模型 | 专用 pgx 单连接 + 单 goroutine 串行消费，断线指数退避重连 |
-| 去重 | 自身通知按 node_id 跳过；跨路径重叠按节点级投递游标去重 |
+| 去重 | 自身通知按 node_id 跳过；监听路径游标去重追赶/队列重叠；追赶按 `messages.origin_node`（迁移 v5）精确跳过本节点已内联投递的消息 |
+| 游标推进 | 仅监听路径推进（自身/远端通知处理时）；本地内联投递不推进——避免越过仍在通知队列中的更早远端消息（规划期发现的漏投窗口） |
 | 断连兜底 | 重连后 CatchUp（节点游标 + ReadHistory 分批补投）；超出保留窗口发 gap 帧；客户端离线由 `after_seq` 回放（既有机制） |
+| 连接标识 | LISTEN 连接 `application_name = aether-cluster-<node_id>`（截断 63 字节），便于运维与测试定向定位 |
 | 驱逐并发 | 会话级 `pg_try_advisory_lock`（固定 key，专用连接持有）实现 leader 化 |
 | 单节点开销 | `cluster.enabled: false` 时全部旁路：零额外连接、零额外 SQL |
 
@@ -65,9 +67,13 @@ Node C: 解码 → HasSubscribers(channel) = false → 跳过（无回读）
 ```
 Node B: LISTEN 连接断开 → 记录 WARN, aether_cluster_connected=0 → 退避重连（1s→30s）
 Node B: 重连成功 → LISTEN → CatchUp():
-    对每个本地有订阅者的频道: ReadHistory(after = 节点游标) 分批投递至追平
-    若 MinSeq > 游标+1（保留窗口已越过）→ 向该频道各连接发 gap 帧
-Node B: 进入消费循环，处理断连期间队列中的通知（seq <= 游标 → 去重跳过）
+    anchor = 频道节点游标（仅由监听路径推进，不含本地内联投递）
+    对每个本地有订阅者的频道: ReadHistory(after = anchor) 分批读取至短批
+        origin = 本节点 → 跳过（发布时已内联投递，精确去重）
+        其余 → 本地扇出；每批结束游标推进到批内最大 seq
+    若 MinSeq > anchor+1（保留窗口已越过）→ 向该频道各连接发 gap 帧
+Node B: 进入消费循环，处理断连期间队列中的通知
+    seq <= 游标 → 去重跳过；自身通知 → 按 node_id 跳过并推进游标
 ```
 
 ## 6. 失败模式矩阵
@@ -91,6 +97,7 @@ Node B: 进入消费循环，处理断连期间队列中的通知（seq <= 游�
 - **优雅关闭**：停止顺序 = 驱逐循环 → cluster.Listener → HTTP/WS。Listener 先于 ws 停止，保证排空阶段无新跨节点投递进入连接。
 - **健康与指标**：`/healthz`、`/readyz` 语义不变；新增 cluster 指标（SPEC CL-13），降级状态以指标观测而非健康检查失败表达。
 - **单节点旁路**：`cluster.enabled: false` 时不存在 LISTEN 连接、通知发射与 leader 锁，行为与第2层完全一致。
+- **顺序语义**：跨节点下本地发布的内联投递可能先于仍在通知队列中的更早远端消息到达订阅者（乱序但不丢失）；同一节点并发发布在 v1 已存在同类现象。客户端以 `seq_id` 排序/去重，协议不承诺跨节点严格全序。
 
 ## 8. 未决事项（后续层候选）
 
