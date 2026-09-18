@@ -55,6 +55,30 @@ func (m *mockStore) WriteMessage(ctx context.Context, channel string, payload js
 	return seq, msg.CreatedAt, nil
 }
 
+func (m *mockStore) ReadMessage(ctx context.Context, channel string, seqID int64) (*store.Message, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.readErr != nil {
+		return nil, m.readErr
+	}
+	for i := range m.messages[channel] {
+		if m.messages[channel][i].SeqID == seqID {
+			msg := m.messages[channel][i]
+			return &msg, nil
+		}
+	}
+	return nil, store.ErrMessageNotFound
+}
+
+func (m *mockStore) LatestSeq(ctx context.Context, channel string) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.readErr != nil {
+		return 0, m.readErr
+	}
+	return m.nextSeq[channel], nil
+}
+
 func (m *mockStore) ReadHistory(ctx context.Context, channel string, afterSeq int64, limit int) (*store.HistoryResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

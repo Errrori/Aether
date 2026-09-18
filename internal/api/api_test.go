@@ -108,6 +108,14 @@ func (s *mockStore) ReadHistory(ctx context.Context, channel string, afterSeq in
 	return result, nil
 }
 
+func (s *mockStore) ReadMessage(ctx context.Context, channel string, seqID int64) (*store.Message, error) {
+	return nil, store.ErrMessageNotFound
+}
+
+func (s *mockStore) LatestSeq(ctx context.Context, channel string) (int64, error) {
+	return 0, nil
+}
+
 func (s *mockStore) EvictExpiredMessages(ctx context.Context) (int, int, error) {
 	return 0, 0, nil
 }

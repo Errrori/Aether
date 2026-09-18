@@ -77,6 +77,10 @@ var migrations = []migration{
 	CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook
 	    ON webhook_deliveries (webhook_id, created_at);`,
 	},
+	{
+		Version: 5,
+		SQL:     `ALTER TABLE messages ADD COLUMN IF NOT EXISTS origin_node TEXT;`,
+	},
 }
 
 // RunMigrations creates the database schema if it does not exist.

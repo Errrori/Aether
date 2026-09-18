@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -14,6 +15,22 @@ type Message struct {
 	SeqID     int64
 	Payload   json.RawMessage
 	CreatedAt time.Time
+	// Origin is the node that wrote the message (messages.origin_node). It is
+	// empty for single-node writes and rows created before migration v5.
+	Origin string
+}
+
+// ErrMessageNotFound is returned by ReadMessage when the message does not
+// exist (e.g. it was removed by the retention loop).
+var ErrMessageNotFound = errors.New("message not found")
+
+// Options configures optional store behaviour. Options is passed variadically
+// to New so existing call sites remain source-compatible.
+type Options struct {
+	// NodeID enables cluster mode: WriteMessage stamps messages with this node
+	// id and emits a pg_notify event inside the write transaction. Empty
+	// (default) means single-node mode with no extra SQL on the write path.
+	NodeID string
 }
 
 // HistoryResult is returned by ReadHistory.
@@ -29,6 +46,8 @@ type Store interface {
 	Ping(ctx context.Context) error
 	WriteMessage(ctx context.Context, channel string, payload json.RawMessage, idempotencyKey *string) (seqID int64, timestamp time.Time, err error)
 	ReadHistory(ctx context.Context, channel string, afterSeq int64, limit int) (*HistoryResult, error)
+	ReadMessage(ctx context.Context, channel string, seqID int64) (*Message, error)
+	LatestSeq(ctx context.Context, channel string) (int64, error)
 	EvictExpiredMessages(ctx context.Context) (channelsCleaned int, messagesEvicted int, err error)
 	Close()
 }

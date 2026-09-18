@@ -627,7 +627,7 @@ func New(ctx context.Context, dbCfg *config.DatabaseConfig, retCfg *config.Reten
 ReadMessage(ctx context.Context, channel string, seqID int64) (*Message, error)
 LatestSeq(ctx context.Context, channel string) (int64, error) // 频道当前最大 seq；频道不存在返回 0
 
-// Message 新增字段（ReadHistory 一并返回；单节点写入为 NULL/空）
+// Message 新增字段（ReadHistory 与 ReadMessage 一并返回；单节点写入为 NULL/空）
 //   Origin string  // messages.origin_node：消息由哪个节点写入（迁移 v5）
 
 // LeaderStore 是可选接口（与 KeyStore / WebhookStore 同模式，main 中类型断言装配）。

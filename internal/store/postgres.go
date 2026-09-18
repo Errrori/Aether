@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/aether-mq/aether/internal/config"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -14,10 +15,17 @@ type pgStore struct {
 	pool      *pgxpool.Pool
 	retention *config.RetentionConfig
 	ruleMatch func(channel string) (ttl time.Duration, maxCount int)
+
+	// nodeID is non-empty in cluster mode: writes are stamped with it and
+	// emit a pg_notify event inside the write transaction.
+	nodeID string
+	// connCfg is reused to dial dedicated connections outside the pool
+	// (e.g. the eviction leader lock).
+	connCfg *pgx.ConnConfig
 }
 
 // New creates a pgStore backed by a pgx connection pool.
-func New(ctx context.Context, dbCfg *config.DatabaseConfig, retCfg *config.RetentionConfig) (Store, error) {
+func New(ctx context.Context, dbCfg *config.DatabaseConfig, retCfg *config.RetentionConfig, opts ...Options) (Store, error) {
 	poolCfg, err := pgxpool.ParseConfig(dbCfg.DSN)
 	if err != nil {
 		return nil, fmt.Errorf("parse database dsn: %w", err)
@@ -40,8 +48,14 @@ func New(ctx context.Context, dbCfg *config.DatabaseConfig, retCfg *config.Reten
 	s := &pgStore{
 		pool:      pool,
 		retention: retCfg,
+		connCfg:   poolCfg.ConnConfig.Copy(),
 	}
 	s.ruleMatch = s.matchRetentionRule
+	for _, o := range opts {
+		if o.NodeID != "" {
+			s.nodeID = o.NodeID
+		}
+	}
 
 	return s, nil
 }

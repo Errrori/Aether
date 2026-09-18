@@ -2,7 +2,10 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
+
+	"github.com/jackc/pgx/v5"
 )
 
 const maxHistoryLimit = 1000
@@ -20,7 +23,7 @@ func (s *pgStore) ReadHistory(ctx context.Context, channel string, afterSeq int6
 	}
 
 	rows, err := s.pool.Query(ctx,
-		`SELECT seq_id, payload, created_at FROM messages
+		`SELECT seq_id, payload, created_at, COALESCE(origin_node, '') FROM messages
 		 WHERE channel = $1 AND seq_id > $2
 		 ORDER BY seq_id ASC
 		 LIMIT $3`,
@@ -34,7 +37,7 @@ func (s *pgStore) ReadHistory(ctx context.Context, channel string, afterSeq int6
 	result := &HistoryResult{}
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.SeqID, &m.Payload, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.SeqID, &m.Payload, &m.CreatedAt, &m.Origin); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
 		result.Messages = append(result.Messages, m)
@@ -55,4 +58,42 @@ func (s *pgStore) ReadHistory(ctx context.Context, channel string, afterSeq int6
 	}
 
 	return result, nil
+}
+
+// ReadMessage loads a single message by seq_id. It returns ErrMessageNotFound
+// when the message does not exist (e.g. it was removed by the retention loop).
+func (s *pgStore) ReadMessage(ctx context.Context, channel string, seqID int64) (*Message, error) {
+	if err := ValidateChannelName(channel); err != nil {
+		return nil, err
+	}
+
+	var m Message
+	err := s.pool.QueryRow(ctx,
+		`SELECT seq_id, payload, created_at, COALESCE(origin_node, '') FROM messages WHERE channel = $1 AND seq_id = $2`,
+		channel, seqID,
+	).Scan(&m.SeqID, &m.Payload, &m.CreatedAt, &m.Origin)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrMessageNotFound
+		}
+		return nil, fmt.Errorf("read message: %w", err)
+	}
+	return &m, nil
+}
+
+// LatestSeq returns the channel's current (highest allocated) seq_id, or 0 for
+// a channel that does not exist.
+func (s *pgStore) LatestSeq(ctx context.Context, channel string) (int64, error) {
+	if err := ValidateChannelName(channel); err != nil {
+		return 0, err
+	}
+
+	var seq int64
+	if err := s.pool.QueryRow(ctx,
+		`SELECT COALESCE((SELECT current_seq FROM channels WHERE name = $1), 0)`,
+		channel,
+	).Scan(&seq); err != nil {
+		return 0, fmt.Errorf("latest seq: %w", err)
+	}
+	return seq, nil
 }

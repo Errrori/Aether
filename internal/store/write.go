@@ -44,19 +44,25 @@ func (s *pgStore) WriteMessage(ctx context.Context, channel string, payload json
 	// Step 3: Insert message.
 	// When idempotency_key is NULL, the UNIQUE(channel, idempotency_key) constraint
 	// does not fire (NULL != NULL in SQL), so ON CONFLICT is a no-op and INSERT always succeeds.
+	// Messages written in cluster mode are stamped with this node's id so that
+	// catch-up can skip rows already delivered inline by the publisher.
+	var origin *string
+	if s.nodeID != "" {
+		origin = &s.nodeID
+	}
 	var seqID int64
 	var createdAt time.Time
 	err = tx.QueryRow(ctx,
-		`INSERT INTO messages (channel, seq_id, payload, idempotency_key)
-		 VALUES ($1, $2, $3, $4)
+		`INSERT INTO messages (channel, seq_id, payload, idempotency_key, origin_node)
+		 VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (channel, idempotency_key) DO NOTHING
 		 RETURNING seq_id, created_at`,
-		channel, newSeq, payload, idempotencyKey,
+		channel, newSeq, payload, idempotencyKey, origin,
 	).Scan(&seqID, &createdAt)
 
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			// Step 4: Idempotency conflict — query the existing message.
+			// Step 3b: Idempotency conflict — query the existing message.
 			err = tx.QueryRow(ctx,
 				`SELECT seq_id, created_at FROM messages WHERE channel = $1 AND idempotency_key = $2`,
 				channel, *idempotencyKey,
@@ -71,6 +77,20 @@ func (s *pgStore) WriteMessage(ctx context.Context, channel string, payload json
 			return seqID, createdAt, nil
 		}
 		return 0, time.Time{}, fmt.Errorf("insert message: %w", err)
+	}
+
+	// Step 4: Notify other nodes from inside the transaction. PostgreSQL only
+	// delivers the notification if this transaction commits, so a rolled-back
+	// publish never produces an event. The idempotent-conflict branch returned
+	// above and emits nothing (no new message).
+	if s.nodeID != "" {
+		event, err := EncodeMessageEvent(MessageEvent{NodeID: s.nodeID, Channel: channel, SeqID: seqID})
+		if err != nil {
+			return 0, time.Time{}, fmt.Errorf("encode notify event: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, NotifyChannel, event); err != nil {
+			return 0, time.Time{}, fmt.Errorf("notify message event: %w", err)
+		}
 	}
 
 	// Step 5: Advance channel seq.
