@@ -318,20 +318,22 @@ DELETE FROM channels WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.cha
 ### 7.1 v2 实现顺序
 
 ```
-第1层  地基       Key CRUD (FR-2.1)
-第2层  消息入口    Webhook (FR-2.5) + Batch Publish API (FR-2.4 拆分) + MQ 桥接设计文档
-第3层  保护       速率限制 (FR-2.8)
-第4层  扩展       集群模式 (FR-2.2) + Presence (FR-2.3)
+第1层  地基       Key CRUD (FR-2.1)                                                ✅ 已完成
+第2层  消息入口    Webhook (FR-2.5) + Batch Publish API (FR-2.4 拆分) + MQ 桥接设计文档  ✅ 已完成
+第3层  扩展       集群模式 (FR-2.2) + Presence (FR-2.3)                             ← 当前
+第4层  保护       速率限制 (FR-2.8)
 第5层  消费体验    SSE (FR-2.9) + 消息确认 (FR-2.6) + MQ 桥接实现
 第6层  运维可见    管理面板 (FR-2.7) + 批量操作 UI (FR-2.4 拆分)
 ```
 
+顺序变更记录（2026-09-18）：「集群模式 + Presence」与「速率限制」对调（原第3层 ↔ 原第4层）。原因：限流维度的设计（每节点独立 vs 全局聚合）取决于集群形态，先落地集群可避免限流返工；集群是 v2 的核心能力，且 MQ 桥接实现（第5层）依赖其 LISTEN/NOTIFY 通道。第5、6层编号不变，`docs/mq-bridge-design.md` 中的「第5层」引用仍然有效。
+
 依赖关系：
 - 第1层（Key CRUD）为所有后续层提供认证和权限基础设施
 - 第2层（消息入口）依赖第1层的 Key 管理来验证消息源身份
-- 第3层（速率限制）依赖第1层的 Key 标识作为限流维度
-- 第4层（集群模式）依赖第1层的 Key 模型可跨节点共享
-- MQ 桥接设计文档在第2层交付，实现在第5层：待第4层集群跑稳后，MQ Consumer 直接调用 hub.Publish，LISTEN/NOTIFY 透明生效
+- 第3层（集群模式）依赖第1层的 Key 模型可跨节点共享；其前置修复（7.4.6 空频道清理竞态）独立于集群，先行提交
+- 第4层（速率限制）依赖第1层的 Key 标识作为限流维度；若做全局聚合限流，复用第3层的集群通道
+- MQ 桥接设计文档在第2层交付，实现在第5层：待第3层集群跑稳后，MQ Consumer 直接调用 hub.Publish，LISTEN/NOTIFY 透明生效
 - Batch Publish API 端点在第2层（消息入口），管理面板的批量操作 UI 在第6层
 
 ### 7.2 第1层：动态 API Key CRUD
@@ -563,4 +565,194 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 | 40103 | 认证 | Webhook 签名无效 |
 | 40402 | 资源 | Webhook 不存在 |
 | 40902 | 冲突 | Webhook name 重复 |
-|
+
+### 7.4 第3层：集群模式
+
+> 对应 FR-2.2。机制选型、备选方案对比与失败模式矩阵见 `docs/cluster-fanout.md`（ADR）。
+
+#### 7.4.1 目标与边界
+
+目标：多节点共享同一 PostgreSQL 实例，发布到任一节点的消息投递到所有节点上的本地订阅者。节点间无直接通信——PG 同时承担存储、扇出总线与节点发现的角色。
+
+边界：
+
+- 不引入新基础设施（维持 PRD 8.1 的 PG-only 部署形态）
+- `cluster.enabled: false`（默认）时与第2层行为完全一致：不建立 LISTEN 连接、写入路径不产生额外 SQL
+- 扇出为"尽力投递"：NOTIFY 不持久化，断连窗口内遗漏的消息由重连追赶（7.4.4）与客户端 `after_seq` 回放兜底
+- 不在本层范围：Presence（7.5）、节点间 HTTP 转发、跨节点全局限流
+
+#### 7.4.2 模块划分
+
+| 模块 | 变更 |
+|---|---|
+| `internal/cluster` | 新增：LISTEN 连接生命周期、通知解码、去重、投递回调、重连退避与追赶触发 |
+| `internal/store` | 扩展：事务内通知发射、通知载荷编解码、`ReadMessage`、驱逐 leader 锁、空频道清理竞态修复（7.4.6） |
+| `internal/hub` | 扩展：节点级投递游标，新增 `HasSubscribers` / `DeliverRemote` / `CatchUp` 方法（不改动现有 `hub.Hub` 接口） |
+| `internal/config` | 扩展：`cluster` 配置节、校验、环境变量覆盖 |
+| `internal/metrics` | 扩展：实现 `cluster.Metrics` |
+| `cmd/aether` | 扩展：装配 `cluster.Listener`（`h.(cluster.Deliverer)` 断言）、goroutine 生命周期、驱逐循环 leader 化 |
+
+依赖方向：`cluster` 依赖 `store`（载荷解码）；`store` 不依赖 `cluster`。通知发射放在 store 的原因：`pg_notify` 必须与消息写入处于同一事务，事务所有权属于 store；向其他包暴露 `pgx.Tx` 会破坏存储层封装。`cluster.Deliverer` 由 hub 的实例方法结构匹配，hub 不需要反向依赖 cluster。
+
+#### 7.4.3 关键接口
+
+```go
+// --- internal/store 新增/变更 ---
+
+const NotifyChannel = "aether_messages" // PG 通知频道名（非 Aether 频道概念）
+
+// MessageEvent 是跨节点通知载荷：只带定位信息，不带消息体。
+// 理由：pg_notify 载荷上限 8000 字节，而 Aether payload 上限 64KB；
+// 接收节点按 seq 回读，保证与存储内容一致。
+type MessageEvent struct {
+    NodeID  string `json:"node_id"`
+    Channel string `json:"channel"`
+    SeqID   int64  `json:"seq_id"`
+}
+
+func EncodeMessageEvent(e MessageEvent) (string, error)
+func DecodeMessageEvent(payload string) (MessageEvent, error)
+
+// ErrMessageNotFound：按 seq 回读时消息不存在（已被驱逐）。
+var ErrMessageNotFound = errors.New("message not found")
+
+// Options 以变参传入 New，既有调用保持兼容。
+type Options struct {
+    NodeID string // 非空 = 集群模式（写入事务内 pg_notify）；空 = 单节点，无额外 SQL
+}
+func New(ctx context.Context, dbCfg *config.DatabaseConfig, retCfg *config.RetentionConfig, opts ...Options) (Store, error)
+
+// Store 接口新增
+ReadMessage(ctx context.Context, channel string, seqID int64) (*Message, error)
+
+// LeaderStore 是可选接口（与 KeyStore / WebhookStore 同模式，main 中类型断言装配）。
+// TryEvictionLock 在专用连接上获取会话级 advisory lock；
+// 返回 (nil, nil) 表示其他节点持有锁，本节点跳过本轮驱逐。
+type LeaderStore interface {
+    TryEvictionLock(ctx context.Context) (*EvictionLock, error)
+}
+func (l *EvictionLock) Release(ctx context.Context) error
+
+// --- internal/cluster 新增 ---
+
+// Deliverer 由 hub 的实例方法实现；cluster 不依赖 hub 包。
+type Deliverer interface {
+    HasSubscribers(channel string) bool
+    DeliverRemote(ctx context.Context, channel string, seqID int64) error
+    CatchUp(ctx context.Context) error
+}
+
+type Config struct {
+    NodeID        string
+    ReconnectBase time.Duration // 默认 1s
+    ReconnectMax  time.Duration // 默认 30s
+}
+
+type Metrics interface {
+    IncNotificationsReceived()
+    IncSkippedSelf()
+    IncSkippedNoSubscribers()
+    IncDeliverErrors()
+    IncCatchUpMessages(n int)
+    SetConnected(connected bool)
+}
+
+// Run 阻塞运行直到 ctx 取消；内部处理建连、LISTEN、重连退避与追赶触发。
+func New(cfg Config, d Deliverer, m Metrics, logger *slog.Logger) *Listener
+func (l *Listener) Run(ctx context.Context) error
+```
+
+#### 7.4.4 运行机制
+
+**发布路径（启用集群时）**：`hub.Publish → store.WriteMessage` 在同一事务内完成：确保频道 → 锁定频道行取 seq → 插入消息 → `SELECT pg_notify('aether_messages', $payload)` → 推进 current_seq → 提交。PG 保证通知在事务提交后才送达所有 LISTEN 者（回滚即丢弃）。本地扇出保持现状（提交后立即分发）。幂等命中与冲突分支不发送通知（无新消息）。
+
+**接收路径**：`cluster.Listener` 独占一条专用 LISTEN 连接（pgx 单连接，不进连接池——LISTEN 是有状态会话），单 goroutine 串行消费：解码 → 自身通知按 NodeID 跳过 → `HasSubscribers` 为假跳过（无订阅者的节点不产生回读查询）→ `DeliverRemote` 回读并本地扇出。
+
+**启动/重连顺序（关键）**：建连 → `LISTEN` → `CatchUp` → 进入通知消费循环。先 LISTEN 后追赶保证追赶期间的新消息进入连接的通知队列，追赶结束后按序消费；`DeliverRemote` 对 `seq <= 节点游标` 的通知跳过，天然去除追赶与队列的重叠投递。
+
+**节点级投递游标**：hub 维护 `channel → 已扇出最大 seq`，由全部投递路径推进（本地发布、远程投递、历史回放、追赶）。追赶即：对每个有本地订阅者的频道，从游标以 `ReadHistory` 分批读取直到追平；若保留窗口已越过游标（`MinSeq > 游标+1`），向该频道各连接发送 gap 帧（复用既有语义，不新增帧类型）。
+
+**失败处理**：回读返回 `ErrMessageNotFound`（消息已被驱逐）→ 记录 WARN + 指标，跳过该条，不中断循环；LISTEN 连接断开 → 记录 WARN + `aether_cluster_connected=0`，按退避（1s 起，上限 30s）重连后重新 LISTEN + 追赶；本节点发布与本地投递不依赖 LISTEN 连接，重连期间不受影响。
+
+**驱逐 leader**：`cluster.enabled` 时驱逐循环先尝试会话级 advisory lock（固定 key，专用连接持有，周期结束显式释放）。未获得锁的节点跳过本轮，保证同一时刻仅一个节点执行驱逐。
+
+#### 7.4.5 配置
+
+```yaml
+cluster:
+  enabled: false            # 单节点默认关闭；关闭时不建立 LISTEN 连接、不产生通知
+  node_id: ""               # 留空则启动时自动生成（随机 16 字节 hex）；用于通知去重与日志
+  reconnect_base: 1s        # LISTEN 重连退避起点
+  reconnect_max: 30s        # LISTEN 重连退避上限
+```
+
+环境变量覆盖：`AETHER_CLUSTER_ENABLED`、`AETHER_CLUSTER_NODE_ID`、`AETHER_CLUSTER_RECONNECT_BASE`、`AETHER_CLUSTER_RECONNECT_MAX`（标量覆盖，遵循 C-2/C-3；bool 类型为新引入的覆盖类别）。
+
+校验：`enabled` 为真时 `reconnect_base > 0` 且 `reconnect_base <= reconnect_max`；`node_id` 非空时须匹配 `^[A-Za-z0-9_-]{1,64}$`。
+
+#### 7.4.6 前置修复：空频道清理竞态（独立提交）
+
+**根因**：`WriteMessage` 先 `INSERT channels ... ON CONFLICT DO NOTHING`（步骤1）再 `SELECT ... FOR UPDATE`（步骤2）。若两步骤之间驱逐循环的 `DELETE FROM channels WHERE NOT EXISTS(...)` 删除了该行（该频道恰好无消息），步骤2 返回 `ErrNoRows`，发布以 50301 失败。该缺陷为已知遗留问题（原计划并入本层处理），现作为本层第 0 步修复。
+
+**修复**：步骤 1+2 合并为单条语句，原子完成"确保存在 + 加行锁 + 读 current_seq"：
+
+```sql
+INSERT INTO channels (name) VALUES ($1)
+ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+RETURNING current_seq;
+```
+
+`ON CONFLICT DO UPDATE` 执行真实更新并持有行锁直到提交；若并发事务已删除冲突行，PG 保证退回为插入（不复用被删行）。修复后驱逐与发布的任意交错均不产生 50301。
+
+**验证**：CL-11。
+
+#### 7.4.7 验收项
+
+| # | 验收项 |
+|---|--------|
+| CL-1 | `cluster.enabled: false`：不建立 LISTEN 连接、写入路径无 `pg_notify`；全部既有测试零修改通过（回归） |
+| CL-2 | 端到端跨节点扇出：同进程构造 Node A / Node B（共享同一 PG），A 的发布在 1s 内投递到 B 的本地订阅者，消息内容与 seq_id 与存储一致 |
+| CL-3 | 通知载荷仅含 `node_id/channel/seq_id`，不含消息体；接收节点无该频道订阅者时跳过回读（以指标计数验证） |
+| CL-4 | 通知与写入同事务：写入失败/回滚不产生通知；幂等命中（重复 idempotency_key）不产生通知 |
+| CL-5 | 自身去重：Node A 不因自己的通知二次投递，A 的本地订阅者每条消息恰好收到一次 |
+| CL-6 | 回读失败（消息已驱逐 → `ErrMessageNotFound`）记录 WARN + 指标并继续处理后续通知，不中断监听循环 |
+| CL-7 | LISTEN 连接断开后按退避（1s→30s）自动重连并重新 LISTEN；`aether_cluster_connected` 指标反映状态；重连期间本节点发布与本地投递不受影响 |
+| CL-8 | 重连追赶：重连后对本地有订阅者的频道从节点游标补投；游标早于保留窗口（`MinSeq > 游标+1`）时相关连接收到 gap 帧；追赶与队列通知不产生重复投递（游标去重） |
+| CL-9 | 多节点并发发布同一频道：seq 全局无重复无空洞；各节点按 seq 升序投递（游标单调） |
+| CL-10 | 驱逐 leader：两个 store 实例同时尝试，仅一个获得锁并执行驱逐，另一个跳过本轮；锁在周期结束或异常路径释放 |
+| CL-11 | 竞态修复：并发驱逐与发布的压力用例下，1000 次发布无 50301（集成测试，真实 PG） |
+| CL-12 | 优雅关闭：停止顺序为 驱逐循环 → cluster.Listener → HTTP/WS；关闭后 goroutine 收敛（WaitGroup），不向已关闭资源投递 |
+| CL-13 | 指标：`aether_cluster_notifications_received_total`、`..._skipped_self_total`、`..._skipped_no_subscribers_total`、`..._deliver_errors_total`、`..._catchup_messages_total`（Counter）与 `aether_cluster_connected`（Gauge）在 `/metricsz` 可见 |
+| CL-14 | 配置：`cluster` 全字段默认值生效；环境变量覆盖覆盖"覆盖已有值"与"补全缺失值"两种场景；非法配置（reconnect_base <= 0、node_id 非法字符）启动报错 |
+| CL-15 | 集成测试使用真实 PostgreSQL（两个节点实例共享同库），不使用 mock 验证跨节点路径；`-p 1` 串行约定沿用 |
+
+#### 7.4.8 技术决策
+
+| 决策 | 选择 | 理由 |
+|---|---|---|
+| 扇出机制 | LISTEN/NOTIFY | PG 原生、事务内发射与提交原子、广播语义与需求一致；避免引入 Redis/NATS 等第二套基础设施（PRD 8.1）。备选对比见 ADR |
+| 通知载荷 | 仅 `node_id/channel/seq_id` | `pg_notify` 载荷上限 8000B，Aether payload 上限 64KB，无法携带消息体；回读保证内容与存储一致 |
+| 通知发射位置 | store 写入事务内 | 事务内 NOTIFY 由 PG 保证"提交才送达、回滚即丢弃"；事务所有权在 store，避免跨包暴露 `pgx.Tx` |
+| 接收连接 | 专用单连接 + 单 goroutine 串行消费 | LISTEN 是有状态会话，不能随连接池复用；单 goroutine 天然保序，无需并发去重 |
+| 去重方式 | 通知携带 node_id + 节点级游标 | 自身通知按 node_id 跳过；跨路径（追赶/队列）重叠按游标去重 |
+| 断连兜底 | 重连 + 节点游标追赶 + 客户端 after_seq 回放 | NOTIFY 不持久化；三层兜底覆盖"LISTEN 闪断 → 节点重启 → 客户端离线" |
+| 驱逐并发 | 会话级 `pg_try_advisory_lock`（固定 key） | 避免 N 节点重复驱逐；会话锁绑定专用连接，周期结束显式释放 |
+| 接口扩展方式 | hub 新增方法（结构匹配 `cluster.Deliverer`），不改动 `hub.Hub` | 与 KeyStore / WebhookStore 的可选接口装配模式一致；不扩大 ws/api 的依赖契约 |
+| 单节点开销 | `enabled: false` 时零额外连接、零额外 SQL | 保持单节点部署的简单性与性能不回退 |
+
+#### 7.4.9 新增错误码
+
+无。集群为内部机制，不新增 HTTP 错误码；写入失败沿用 50301。`/healthz`、`/readyz` 语义不变——LISTEN 断开的降级状态通过 `aether_cluster_connected` 指标观测，不改变健康检查结果（本节点仍可正常服务本地订阅者与发布）。
+
+### 7.5 Presence（规格待细化，集群验收后补）
+
+目标（FR-2.3）：跟踪并暴露每频道在线订阅者，依赖第3层集群通道做跨节点聚合。
+
+按两阶段流程，本层规格在集群模式验收通过后、开发开始前补齐。待决策项：
+
+- 暴露形式：HTTP 端点（如 `GET /api/v2/presence/{channel}`）与/或订阅时的实时帧
+- 内容：订阅者计数 vs 订阅者明细（明细涉及身份信息暴露面）
+- 聚合机制：DB 心跳表（写放大可控、天然容灾）vs NOTIFY 通知聚合（零写放大、需周期全量对账自愈）
+- 抖动抑制：高频订阅/退订的 debounce 与上报周期
+
+推迟依据：聚合机制的选择取决于集群通道落地后的实测表现（通知吞吐、回读放大、驱逐压力），未经验证前锁定机制属于过度设计。
