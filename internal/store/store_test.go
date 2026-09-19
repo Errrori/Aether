@@ -101,6 +101,22 @@ func truncateAll(t *testing.T, s *pgStore) {
 	}
 }
 
+// backdateChannel makes a channel eligible for the empty-channel cleanup,
+// which only reclaims rows that have been quiet for an eviction interval
+// (the quiet period guards against concurrent publishes, see EvictExpiredMessages).
+func backdateChannel(t *testing.T, s *pgStore, channel string, age time.Duration) {
+	t.Helper()
+	tag, err := s.pool.Exec(context.Background(),
+		`UPDATE channels SET updated_at = now() - make_interval(secs => $2) WHERE name = $1`,
+		channel, age.Seconds())
+	if err != nil {
+		t.Fatalf("backdate channel %s: %v", channel, err)
+	}
+	if tag.RowsAffected() != 1 {
+		t.Fatalf("backdate channel %s: %d rows affected, want 1", channel, tag.RowsAffected())
+	}
+}
+
 // --- S-1: RunMigrations creates all tables and indexes ---
 
 func TestRunMigrations_EmptyDB(t *testing.T) {
@@ -418,6 +434,10 @@ func TestEvict_EmptyChannelCleanup(t *testing.T) {
 		t.Fatalf("delete messages: %v", err)
 	}
 
+	// The channel must have been quiet for an eviction interval before the
+	// cleanup reclaims it.
+	backdateChannel(t, s, "temp.ch", time.Hour)
+
 	_, _, err = s.EvictExpiredMessages(context.Background())
 	if err != nil {
 		t.Fatalf("EvictExpiredMessages: %v", err)
@@ -581,8 +601,10 @@ func TestWriteMessage_ChannelRecreatedAfterEviction(t *testing.T) {
 	}
 
 	// Let the message expire, then run eviction: TTL delete removes the last
-	// message and the empty-channel cleanup reclaims the channel row.
+	// message and the empty-channel cleanup reclaims the channel row once it
+	// has been quiet for an eviction interval.
 	time.Sleep(20 * time.Millisecond)
+	backdateChannel(t, s, "recreate.test", time.Hour)
 	if _, _, err := s.EvictExpiredMessages(ctx); err != nil {
 		t.Fatalf("eviction: %v", err)
 	}
@@ -856,7 +878,12 @@ func TestReadMessage(t *testing.T) {
 	if msg.SeqID != seq {
 		t.Errorf("SeqID = %d, want %d", msg.SeqID, seq)
 	}
-	if string(msg.Payload) != `{"v":7}` {
+	// jsonb round-trips normalise whitespace, so compare semantically.
+	var got map[string]int
+	if err := json.Unmarshal(msg.Payload, &got); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if len(got) != 1 || got["v"] != 7 {
 		t.Errorf("Payload = %s, want {\"v\":7}", msg.Payload)
 	}
 	if !msg.CreatedAt.Equal(ts) {

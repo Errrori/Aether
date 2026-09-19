@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // EvictExpiredMessages cleans up messages per channel based on retention rules.
@@ -70,9 +71,22 @@ func (s *pgStore) EvictExpiredMessages(ctx context.Context) (int, int, error) {
 		}
 	}
 
-	// Clean up empty channels.
+	// Clean up empty channels that have been quiet for at least one eviction
+	// interval. The quiet period is a correctness guard, not just hygiene:
+	// WriteMessage advances the channel row (updated_at) in the same
+	// transaction as the message insert, so a channel that concurrently gained
+	// a message has a fresh updated_at and this DELETE skips it via the row
+	// recheck instead of failing the messages→channels foreign key check
+	// (SQLSTATE 23503).
+	grace := s.retention.EvictionInterval
+	if grace <= 0 {
+		grace = time.Minute
+	}
 	_, err = s.pool.Exec(ctx,
-		`DELETE FROM channels WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.channel = channels.name)`,
+		`DELETE FROM channels
+		 WHERE updated_at < now() - make_interval(secs => $1)
+		   AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.channel = channels.name)`,
+		grace.Seconds(),
 	)
 	if err != nil {
 		return totalCleaned, totalEvicted, fmt.Errorf("clean empty channels: %w", err)

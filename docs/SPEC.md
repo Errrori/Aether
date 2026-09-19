@@ -22,6 +22,8 @@ Phase 6  ws  (依赖 hub, auth) ────────────────
 
 ## 2. 模块验收标准
 
+> 测试从简，优先开发进度：验收项聚焦核心功能；性能、压力、极端并发类验收项标记为选做，不阻塞验收与推进。
+
 ### 2.1 `internal/config`
 
 | # | 验收项 |
@@ -42,7 +44,7 @@ Phase 6  ws  (依赖 hub, auth) ────────────────
 | S-5 | `WriteMessage`：idempotency_key 为空时不触发去重逻辑，正常写入 |
 | S-6 | `ReadHistory`：返回 `seq_id > afterSeq` 的消息，按 `seq_id ASC` 排序，limit 上限 1000 |
 | S-7 | `ReadHistory`：频道不存在时返回空切片，不返回错误 |
-| S-8 | `EvictExpiredMessages`：按频道逐个清理 TTL 和 max_count，清理空频道，返回清理统计 |
+| S-8 | `EvictExpiredMessages`：按频道逐个清理 TTL 和 max_count，回收已静默一个驱逐周期的空频道（防并发发布竞态，见 7.4.6），返回清理统计 |
 | S-9 | `Ping`：验证 PG 连接可用 |
 | S-10 | 集成测试需真实 PostgreSQL（Docker），不使用 mock |
 
@@ -292,8 +294,10 @@ DELETE FROM messages WHERE channel = $1 AND created_at < now() - $2::interval;
 -- 按最大计数驱逐
 DELETE FROM messages WHERE channel = $1 AND seq_id <= ($2 - $3);
 
--- 清理空频道
-DELETE FROM channels WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.channel = channels.name);
+-- 回收空频道（仅限已静默一个驱逐周期的，见 7.4.6 的并发守卫）
+DELETE FROM channels
+WHERE updated_at < now() - make_interval(secs => <eviction_interval_seconds>)
+  AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.channel = channels.name);
 ```
 
 ## 6. 技术决策摘要
@@ -710,7 +714,9 @@ RETURNING current_seq;
 
 `ON CONFLICT DO UPDATE` 执行真实更新并持有行锁直到提交；若并发事务已删除冲突行，PG 保证退回为插入（不复用被删行）。修复后驱逐与发布的任意交错均不产生 50301。
 
-**验证**：CL-11。
+**补充修复（集成验收期间发现）**：发布侧修复后，竞态转移到驱逐侧——全局空频道清理仍可能撞 FK（23503 "update or delete on table channels violates foreign key constraint"，写入在清理语句快照之后提交，而 FK 触发器用新快照读取到新消息）。修复：清理加"静默期"条件（`updated_at` 早于一个驱逐周期，见 §5.4）。发布事务在同一事务内推进频道行（`current_seq`/`updated_at`），因此并发写入的频道在行锁重检时 `updated_at` 已刷新、条件为假，清理主动跳过而非报错。静默期同时避免了对活跃频道的无谓删除尝试。
+
+**验证**：CL-11（含驱逐侧无错误的断言）。
 
 #### 7.4.7 验收项
 
@@ -726,7 +732,7 @@ RETURNING current_seq;
 | CL-8 | 重连追赶：重连后对本地有订阅者的频道从节点游标分批补投；`origin = 本节点` 的消息精确跳过（发布时已内联投递），不产生重复投递；游标早于保留窗口（`MinSeq > 游标+1`）时相关连接收到 gap 帧 |
 | CL-9 | 多节点并发发布同一频道：seq 全局无重复无空洞；每个订阅者收到的 seq 集合完整（无重无漏）；不承诺严格升序（乱序为文档化边界，见 7.4.4） |
 | CL-10 | 驱逐 leader：两个 store 实例同时尝试，仅一个获得锁并执行驱逐，另一个跳过本轮；锁在周期结束或异常路径释放 |
-| CL-11 | 竞态修复：并发驱逐与发布的压力用例下，1000 次发布无 50301（集成测试，真实 PG） |
+| CL-11 | 竞态修复：并发驱逐与发布的压力用例下，1000 次发布无 50301（集成测试，真实 PG）。**选做**：不阻塞验收与推进 |
 | CL-12 | 优雅关闭：停止顺序为 驱逐循环 → cluster.Listener → HTTP/WS；关闭后 goroutine 收敛（WaitGroup），不向已关闭资源投递 |
 | CL-13 | 配置：`cluster` 全字段默认值生效；环境变量覆盖覆盖"覆盖已有值"与"补全缺失值"两种场景；非法配置（reconnect_base <= 0、node_id 非法字符）启动报错 |
 | CL-14 | 集成测试使用真实 PostgreSQL（两个节点实例共享同库），不使用 mock 验证跨节点路径；`-p 1` 串行约定沿用 |
