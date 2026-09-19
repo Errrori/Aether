@@ -588,7 +588,7 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 |---|---|
 | `internal/cluster` | 新增：LISTEN 连接生命周期、通知解码、去重、投递回调、重连退避与追赶触发 |
 | `internal/store` | 扩展：迁移 v5（`origin_node`）、事务内通知发射、通知载荷编解码、`ReadMessage`/`LatestSeq`、驱逐 leader 锁、空频道清理竞态修复（7.4.6） |
-| `internal/hub` | 扩展：节点级投递游标，新增 `HasSubscribers` / `DeliverRemote` / `CatchUp` 方法（不改动现有 `hub.Hub` 接口） |
+| `internal/hub` | 扩展：`HubConfig` 增 `NodeID`（非空=集群模式），节点级投递游标；新增 `HasSubscribers` / `DeliverRemote` / `CatchUp` 方法（不改动现有 `hub.Hub` 接口） |
 | `internal/config` | 扩展：`cluster` 配置节、校验、环境变量覆盖 |
 | `cmd/aether` | 扩展：装配 `cluster.Listener`（`h.(cluster.Deliverer)` 断言）、goroutine 生命周期、驱逐循环 leader 化 |
 
@@ -672,7 +672,9 @@ func (l *Listener) Run(ctx context.Context) error
 
 **启动/重连顺序（关键）**：建连 → `LISTEN` → `CatchUp` → 进入通知消费循环。先 LISTEN 后追赶保证追赶期间的新消息进入连接的通知队列，追赶结束后按序消费，且与追赶内容不重复（游标去重）。
 
-**追赶（LISTEN 断连恢复）**：对每个有本地订阅者的频道，anchor = 当前游标，分批 `ReadHistory`（每批 ≤ 1000，循环至短批，批间检查 `ctx.Err()`）；逐条处理——`Origin == 本节点` 的行跳过（发布时已内联投递过，据此精确去重），其余投递；每批结束后游标推进到批内最大 seq。若 `MinSeq > anchor+1`（保留窗口已越过），向该频道各连接发送 gap 帧（requested_from = 连接自身游标（如有）否则 anchor，available_from = MinSeq；复用既有语义，不新增帧类型）。
+**追赶（LISTEN 断连恢复）**：对每个有本地订阅者的频道，anchor = 当前游标，分批 `ReadHistory`（每批 ≤ 1000，循环至短批，批间检查 `ctx.Err()`）；逐条处理——`Origin == 本节点` 的行跳过（发布时已内联投递过，据此精确去重），其余投递；每批结束后游标推进到批内最大 seq。若 `MinSeq > anchor+1`（保留窗口已越过），向该频道各连接发送 gap 帧（requested_from = 连接自身游标（如有）否则 anchor，available_from = MinSeq；复用既有语义，不新增帧类型）。单频道追赶失败只记 WARN，不中断其余频道。
+
+**连接游标与追赶过滤（实现补充）**：连接游标在订阅时初始化——带 `after_seq` 的订阅取回放上界；不带 `after_seq` 的订阅在集群模式下取 `LatestSeq(频道)`，追赶投递时按连接游标过滤（`seq <= 连接游标` 则跳过），保证中途新订阅的客户端不会被回灌订阅前的历史；追赶投递成功后同步推进连接游标。频道没有节点游标时（如订阅时的初始化查询失败），追赶整体跳过该频道并记 WARN，避免从零回放造成历史洪泛。
 
 **失败处理**：回读返回 `ErrMessageNotFound`（消息已被驱逐）→ 记录 WARN，跳过该条，不中断循环；LISTEN 连接断开 → 记录 WARN，按退避（1s 起，上限 30s）重连后重新 LISTEN + 追赶，重连成功记 INFO；本节点发布与本地投递不依赖 LISTEN 连接，重连期间不受影响。无订阅者跳过为高频正常路径，不记日志。
 
