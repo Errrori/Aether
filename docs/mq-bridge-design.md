@@ -177,7 +177,7 @@ RabbitMQ 利用 Dead Letter Exchange (DLX) 原生机制，无需桥接器自行�
    - `template.go` — 复用 Webhook 模板引擎（提取到 `internal/webhook/template.go` 为公共函数）
 3. **装配** — `main.go` 检查配置，启动桥接 goroutine
 4. **优雅关闭** — bridge 注册到 shutdown 序列
-5. **测试** — 集成测试使用 `testcontainers-go` 启动 Kafka/RabbitMQ 容器
+5. **测试** — 核心路径集成测试使用 `testcontainers-go` 启动 Kafka/RabbitMQ 容器，非核心路径从简
 
 ## 8. 技术决策
 

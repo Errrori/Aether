@@ -119,4 +119,4 @@ Node B: 进入消费循环，处理断连期间队列中的通知
 | 通知与写入同事务（回滚后无通知，失败注入点在 notify 之后） | `TestWriteMessage_NoNotifyWhenTransactionAbortsAfterNotify` |
 | 驱逐 leader 双实例竞争与释放 | `TestEvictionLock_Contention` |
 
-待回填：跨节点端到端延迟实测值、热点频道回读放大测量、并发场景下的乱序率观测。
+可选补充（不阻塞验收）：跨节点端到端延迟实测值、热点频道回读放大测量、并发场景下的乱序率观测。
