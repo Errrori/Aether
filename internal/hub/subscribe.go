@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/aether-mq/aether/internal/store"
@@ -69,6 +70,8 @@ func (h *hubImpl) Subscribe(conn *Connection, channels []string, afterSeq map[st
 					fmt.Sprintf("history read failed for %s: %v", ps.channel, err))
 				continue
 			}
+		} else if h.config.NodeID != "" {
+			h.initClusterCursor(conn, ps.channel)
 		}
 		registered = append(registered, ps.channel)
 	}
@@ -163,7 +166,25 @@ func (h *hubImpl) replayHistory(conn *Connection, channel string, afterSeq int64
 	}
 
 	conn.SetCursor(channel, maxSeq)
+	if h.config.NodeID != "" {
+		h.advanceNodeCursor(channel, maxSeq)
+	}
 	return nil
+}
+
+// initClusterCursor initialises the node and connection cursors for a
+// cluster-mode subscription without after_seq: the client asked for live
+// messages only, so a later reconnect catch-up must not replay older history.
+func (h *hubImpl) initClusterCursor(conn *Connection, channel string) {
+	latest, err := h.store.LatestSeq(context.Background(), channel)
+	if err != nil {
+		// Leave the cursors unset: catch-up skips channels without a node
+		// cursor rather than risking a history flood.
+		slog.Warn("cluster cursor init failed", "channel", channel, "err", err)
+		return
+	}
+	h.setNodeCursorIfAbsent(channel, latest)
+	conn.SetCursor(channel, latest)
 }
 
 func (h *hubImpl) Unsubscribe(conn *Connection, channels []string) {
@@ -179,6 +200,7 @@ func (h *hubImpl) Unsubscribe(conn *Connection, channels []string) {
 			if len(subs) == 0 {
 				delete(h.channels, ch)
 				h.activeChans.Add(-1)
+				h.dropNodeCursor(ch)
 				if h.metrics.DecChannels != nil {
 					h.metrics.DecChannels()
 				}
@@ -208,6 +230,7 @@ func (h *hubImpl) RemoveConnection(conn *Connection) {
 			if len(subs) == 0 {
 				delete(h.channels, ch)
 				h.activeChans.Add(-1)
+				h.dropNodeCursor(ch)
 				if h.metrics.DecChannels != nil {
 					h.metrics.DecChannels()
 				}

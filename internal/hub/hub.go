@@ -23,6 +23,10 @@ type HubConfig struct {
 	MaxChannelsPerSubscribe int
 	MaxChannelsPerConn      int
 	HistoryLimit            int
+	// NodeID is non-empty in cluster mode. It enables the node-level delivery
+	// cursor and the cluster delivery methods (DeliverRemote / CatchUp), and
+	// identifies messages published by this node (origin_node).
+	NodeID string
 }
 
 // Hub is the core runtime component that manages channels, subscriptions,
@@ -46,6 +50,13 @@ type hubImpl struct {
 	connsMu sync.RWMutex
 	conns   map[string]*Connection // connID -> *Connection
 
+	// cursorMu guards nodeCursors: per-channel high-water mark of seqs
+	// accounted for by the cluster listener path (delivered or skipped as
+	// evicted). Lock order: h.mu may be held while acquiring cursorMu, never
+	// the other way around.
+	cursorMu    sync.Mutex
+	nodeCursors map[string]int64
+
 	activeChans atomic.Int64
 }
 
@@ -67,11 +78,12 @@ func New(s store.Store, a auth.Auth, cfg HubConfig, m Metrics) Hub {
 		cfg.HistoryLimit = 1000
 	}
 	return &hubImpl{
-		store:    s,
-		auth:     a,
-		metrics:  m,
-		config:   cfg,
-		channels: make(map[string]map[string]*Connection),
-		conns:    make(map[string]*Connection),
+		store:       s,
+		auth:        a,
+		metrics:     m,
+		config:      cfg,
+		channels:    make(map[string]map[string]*Connection),
+		conns:       make(map[string]*Connection),
+		nodeCursors: make(map[string]int64),
 	}
 }

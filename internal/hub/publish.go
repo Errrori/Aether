@@ -45,23 +45,7 @@ func (h *hubImpl) Publish(ctx context.Context, channel string, payload json.RawM
 		return seqID, timestamp, nil
 	}
 
-	h.mu.RLock()
-	subs := h.channels[channel]
-	conns := make([]*Connection, 0, len(subs))
-	for _, conn := range subs {
-		conns = append(conns, conn)
-	}
-	h.mu.RUnlock()
-
-	pushed := 0
-	for _, conn := range conns {
-		select {
-		case conn.Send <- msgBytes:
-			pushed++
-		default:
-			conn.Close()
-		}
-	}
+	pushed := h.fanout(channel, msgBytes)
 
 	if h.metrics.IncMessagesPublished != nil {
 		h.metrics.IncMessagesPublished(channel)
@@ -74,4 +58,28 @@ func (h *hubImpl) Publish(ctx context.Context, channel string, payload json.RawM
 	}
 
 	return seqID, timestamp, nil
+}
+
+// fanout pushes a frame to every local subscriber of the channel, closing
+// connections whose outbound buffer is full. It returns the number of frames
+// queued.
+func (h *hubImpl) fanout(channel string, frame []byte) int {
+	h.mu.RLock()
+	subs := h.channels[channel]
+	conns := make([]*Connection, 0, len(subs))
+	for _, conn := range subs {
+		conns = append(conns, conn)
+	}
+	h.mu.RUnlock()
+
+	pushed := 0
+	for _, conn := range conns {
+		select {
+		case conn.Send <- frame:
+			pushed++
+		default:
+			conn.Close()
+		}
+	}
+	return pushed
 }
