@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/aether-mq/aether/internal/api"
 	"github.com/aether-mq/aether/internal/auth"
+	"github.com/aether-mq/aether/internal/cluster"
 	"github.com/aether-mq/aether/internal/config"
 	"github.com/aether-mq/aether/internal/hub"
 	"github.com/aether-mq/aether/internal/keymgmt"
@@ -49,9 +52,29 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
+	// 3a. Cluster mode: resolve the node identity before the store is created
+	// so the store (origin stamping + notifications) and the listener share it.
+	// Empty nodeID keeps every cluster path disabled.
+	var nodeID string
+	if cfg.Cluster.Enabled {
+		nodeID = cfg.Cluster.NodeID
+		if nodeID == "" {
+			generated, err := generateNodeID()
+			if err != nil {
+				return fmt.Errorf("generate node id: %w", err)
+			}
+			nodeID = generated
+		}
+		slog.Info("cluster mode enabled", "node_id", nodeID)
+	}
+
 	// 4. Storage engine.
 	slog.Info("connecting to database")
-	st, err := store.New(ctx, &cfg.Database, &cfg.Retention)
+	var storeOpts []store.Options
+	if nodeID != "" {
+		storeOpts = append(storeOpts, store.Options{NodeID: nodeID})
+	}
+	st, err := store.New(ctx, &cfg.Database, &cfg.Retention, storeOpts...)
 	if err != nil {
 		return fmt.Errorf("database: %w", err)
 	}
@@ -85,9 +108,38 @@ func run() error {
 		MaxChannelsPerSubscribe: 100,
 		MaxChannelsPerConn:      1000,
 		HistoryLimit:            1000,
+		NodeID:                  nodeID,
 	}
 	h := hub.New(st, au, hubCfg, m)
 	slog.Info("hub ready")
+
+	// 7a. Cluster listener (v2 layer 3): consumes cross-node notifications and
+	// feeds them into the hub. Stopped before the HTTP server drains.
+	clusterCtx, clusterCancel := context.WithCancel(context.Background())
+	defer clusterCancel()
+
+	var clusterDone sync.WaitGroup
+	if cfg.Cluster.Enabled {
+		deliverer, ok := h.(cluster.Deliverer)
+		if !ok {
+			return fmt.Errorf("hub does not implement cluster.Deliverer")
+		}
+		listener := cluster.New(cluster.Config{
+			DSN:           cfg.Database.DSN,
+			NodeID:        nodeID,
+			ReconnectBase: cfg.Cluster.ReconnectBase,
+			ReconnectMax:  cfg.Cluster.ReconnectMax,
+		}, deliverer, slog.Default())
+
+		clusterDone.Add(1)
+		go func() {
+			defer clusterDone.Done()
+			if err := listener.Run(clusterCtx); err != nil {
+				slog.Warn("cluster listener stopped", "err", err)
+			}
+		}()
+		slog.Info("cluster listener started")
+	}
 
 	// 8. WebSocket manager.
 	wsm := ws.NewManager(h, au, cfg.WebSocket)
@@ -110,13 +162,23 @@ func run() error {
 	}
 	srv := api.New(h, au, st, km, ks, whm, wsm, apiCfg)
 
-	// 10. Background tasks: eviction loop.
+	// 10. Background tasks: eviction loop. In cluster mode the loop first
+	// acquires the leader lock so exactly one node evicts per cycle.
+	var evictLeader store.LeaderStore
+	if cfg.Cluster.Enabled {
+		ls, ok := st.(store.LeaderStore)
+		if !ok {
+			return fmt.Errorf("store does not implement LeaderStore")
+		}
+		evictLeader = ls
+	}
+
 	evictCtx, evictCancel := context.WithCancel(context.Background())
 	defer evictCancel()
 
 	var evictDone sync.WaitGroup
 	evictDone.Add(1)
-	go runEvictionLoop(evictCtx, st, cfg.Retention.EvictionInterval, &evictDone)
+	go runEvictionLoop(evictCtx, st, evictLeader, cfg.Retention.EvictionInterval, &evictDone)
 
 	// 11. Start the HTTP server in a goroutine.
 	serverErr := make(chan error, 1)
@@ -141,9 +203,13 @@ func run() error {
 		slog.Info("received signal, initiating graceful shutdown")
 	}
 
-	// 13. Shutdown sequence.
+	// 13. Shutdown sequence: background tasks finish before the server drain
+	// and before the deferred store close.
 	evictCancel()
 	evictDone.Wait()
+
+	clusterCancel()
+	clusterDone.Wait()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.Shutdown.Timeout)
 	defer shutdownCancel()
@@ -178,7 +244,7 @@ func setupLogging(cfg config.LogConfig) {
 	slog.SetDefault(slog.New(h))
 }
 
-func runEvictionLoop(ctx context.Context, s store.Store, interval time.Duration, done *sync.WaitGroup) {
+func runEvictionLoop(ctx context.Context, s store.Store, leader store.LeaderStore, interval time.Duration, done *sync.WaitGroup) {
 	defer done.Done()
 
 	ticker := time.NewTicker(interval)
@@ -190,12 +256,44 @@ func runEvictionLoop(ctx context.Context, s store.Store, interval time.Duration,
 			slog.Debug("eviction loop stopped")
 			return
 		case <-ticker.C:
-			channels, msgs, err := s.EvictExpiredMessages(ctx)
-			if err != nil {
-				slog.Warn("eviction cycle failed", "err", err)
-			} else if channels > 0 || msgs > 0 {
-				slog.Info("eviction completed", "channels_cleaned", channels, "messages_evicted", msgs)
-			}
+			runEvictionCycle(ctx, s, leader)
 		}
 	}
+}
+
+// runEvictionCycle runs one eviction round. In cluster mode (leader != nil) it
+// first acquires the leader lock, so nodes that lose the race skip the round
+// instead of evicting concurrently.
+func runEvictionCycle(ctx context.Context, s store.Store, leader store.LeaderStore) {
+	if leader != nil {
+		lock, err := leader.TryEvictionLock(ctx)
+		if err != nil {
+			slog.Warn("eviction leader lock failed", "err", err)
+			return
+		}
+		if lock == nil {
+			slog.Debug("eviction skipped: another node holds the leader lock")
+			return
+		}
+		defer func() {
+			if err := lock.Release(context.Background()); err != nil {
+				slog.Warn("eviction leader lock release failed", "err", err)
+			}
+		}()
+	}
+
+	channels, msgs, err := s.EvictExpiredMessages(ctx)
+	if err != nil {
+		slog.Warn("eviction cycle failed", "err", err)
+	} else if channels > 0 || msgs > 0 {
+		slog.Info("eviction completed", "channels_cleaned", channels, "messages_evicted", msgs)
+	}
+}
+
+func generateNodeID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
