@@ -326,8 +326,8 @@ WHERE updated_at < now() - make_interval(secs => <eviction_interval_seconds>)
 第1层  地基       Key CRUD (FR-2.1)                                                ✅ 已完成
 第2层  消息入口    Webhook (FR-2.5) + Batch Publish API (FR-2.4 拆分)          ✅ 已完成
 第3层  扩展       集群模式 (FR-2.2)                                                ✅ 已完成
-第4层  保护       速率限制 (FR-2.8)                                                   ← 当前
-第5层  消费体验    SSE (FR-2.9) + 消息确认 (FR-2.6)
+第4层  保护       速率限制 (FR-2.8)                                                ✅ 已完成
+第5层  消费体验    SSE (FR-2.9) + 消息确认 (FR-2.6)                                  ← 当前
 第6层  扩展       Presence (FR-2.3)                                                （推迟）
 ```
 
@@ -925,6 +925,8 @@ rate_limit:
 | RL-12 | `TestStartWait_StopsOnCancel`；`TestNew_Defaults` 校验 sweeper 默认参数 |
 
 补充用例：`TestPublish_RateLimitAllowsUnderQuota`（配额内放行路径）。
+
+CI 验证：run #64（commit 09bea06）通过，含 `go test -race` 与真实 PostgreSQL 集成测试。期间修复一处 Linux 时钟精度暴露的缺陷：`Reservation.Cancel()` 内部取真实 `time.Now()` 与检查时刻不一致，已改为 `CancelAt(now)`；测试侧将时序敏感用例改为可控时钟（`allowAt`）。
 
 ### 7.6 Presence（规格待细化，推迟）
 
