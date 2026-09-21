@@ -133,7 +133,6 @@ Aether 是一个轻量级的实时消息推送中间件，用 Go 语言编写，
 | FR-2.4 | 批量发布 | 单个 HTTP 请求发布到多频道 |
 | FR-2.5 | Webhook 发布 | 入站 Webhook 触发发布 |
 | FR-2.6 | 消息确认 | 订阅者确认接收，服务器跟踪每订阅者游标 |
-| FR-2.7 | 管理面板 | 监控连接、频道和消息流的 Web UI |
 | FR-2.8 | 速率限制 | 每发布者、每频道的速率限制 |
 | FR-2.9 | SSE 传输 | Server-Sent Events 作为 WebSocket 替代 |
 
@@ -725,7 +724,6 @@ WebSocket 升级验证 HTTP Origin 头：
 | 2b | 集群模式 | 多节点共享 PG，利用 LISTEN/NOTIFY 实现跨节点扇出，节点发现 |
 | 2c | SSE 传输 | Server-Sent Events 端点 |
 | 2d | 高级功能 | Presence，消息确认，速率限制，批量发布 |
-| 2e | 管理面板 | Web UI 监控和 Key 管理 |
 
 ## 11. 验证计划
 

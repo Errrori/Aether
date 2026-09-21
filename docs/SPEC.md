@@ -318,28 +318,26 @@ WHERE updated_at < now() - make_interval(secs => <eviction_interval_seconds>)
 
 ## 7. v2 实现规格
 
-> v2 在 v1 单节点消息推送的基础上，增加动态 Key 管理、多消息源接入、集群扩展、多种消费方式和运维可见性。
+> v2 在 v1 单节点消息推送的基础上，增加动态 Key 管理、多消息源接入、集群扩展和多种消费方式。
 
 ### 7.1 v2 实现顺序
 
 ```
 第1层  地基       Key CRUD (FR-2.1)                                                ✅ 已完成
-第2层  消息入口    Webhook (FR-2.5) + Batch Publish API (FR-2.4 拆分) + MQ 桥接设计文档  ✅ 已完成
+第2层  消息入口    Webhook (FR-2.5) + Batch Publish API (FR-2.4 拆分)          ✅ 已完成
 第3层  扩展       集群模式 (FR-2.2) + Presence (FR-2.3)                             ← 当前
 第4层  保护       速率限制 (FR-2.8)
-第5层  消费体验    SSE (FR-2.9) + 消息确认 (FR-2.6) + MQ 桥接实现
-第6层  运维可见    管理面板 (FR-2.7) + 批量操作 UI (FR-2.4 拆分)
+第5层  消费体验    SSE (FR-2.9) + 消息确认 (FR-2.6)
 ```
 
-顺序变更记录（2026-09-18）：「集群模式 + Presence」与「速率限制」对调（原第3层 ↔ 原第4层）。原因：限流维度的设计（每节点独立 vs 全局聚合）取决于集群形态，先落地集群可避免限流返工；集群是 v2 的核心能力，且 MQ 桥接实现（第5层）依赖其 LISTEN/NOTIFY 通道。第5、6层编号不变，`docs/mq-bridge-design.md` 中的「第5层」引用仍然有效。
+顺序变更记录（2026-09-18）：「集群模式 + Presence」与「速率限制」对调（原第3层 ↔ 原第4层）。原因：限流维度的设计（每节点独立 vs 全局聚合）取决于集群形态，先落地集群可避免限流返工。
 
 依赖关系：
 - 第1层（Key CRUD）为所有后续层提供认证和权限基础设施
 - 第2层（消息入口）依赖第1层的 Key 管理来验证消息源身份
 - 第3层（集群模式）依赖第1层的 Key 模型可跨节点共享；其前置修复（7.4.6 空频道清理竞态）独立于集群，先行提交
 - 第4层（速率限制）依赖第1层的 Key 标识作为限流维度；若做全局聚合限流，复用第3层的集群通道
-- MQ 桥接设计文档在第2层交付，实现在第5层：待第3层集群跑稳后，MQ Consumer 直接调用 hub.Publish，LISTEN/NOTIFY 透明生效
-- Batch Publish API 端点在第2层（消息入口），管理面板的批量操作 UI 在第6层
+- Batch Publish API 端点在第2层（消息入口）
 
 ### 7.2 第1层：动态 API Key CRUD
 
@@ -508,19 +506,7 @@ CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys (key_hash);
 | BP-5 | HTTP 状态码始终为 200（只要请求格式正确），由 `results[].status` 区分成功/失败 |
 | BP-6 | 使用已有 auth middleware（API Key 认证） |
 
-#### 7.3.3 模块：MQ 桥接设计文档
-
-仅交付设计文档 `docs/mq-bridge-design.md`，实现在第5层。
-
-| # | 验收项 |
-|---|--------|
-| MQ-1 | 覆盖 Kafka 消费者组和 RabbitMQ 直接消费两种模型 |
-| MQ-2 | Topic/Queue → Channel 映射复用 Webhook 模板引擎 |
-| MQ-3 | 定义死信队列/DLX 错误处理策略 |
-| MQ-4 | 定义与 `Hub.Publish` 的集成方式和安全性考量 |
-| MQ-5 | 草案配置结构（YAML） |
-
-#### 7.3.4 数据模型
+#### 7.3.3 数据模型
 
 ```sql
 CREATE TABLE IF NOT EXISTS webhooks (
@@ -551,7 +537,7 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 
 迁移版本：v4。
 
-#### 7.3.5 技术决策
+#### 7.3.4 技术决策
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
@@ -559,9 +545,8 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 | 入站端点路径 | `/api/v2/webhooks/{url_token}` | url_token 是 64 字符 hex 随机字符串，防止枚举 |
 | 模板引擎 | 点号路径 `{path.to.field}` | 简单够用，Webhook payload 通常扁平结构 |
 | Batch publish 原子性 | 各自独立 | 频道间无事务依赖，单条失败不应该回滚已成功的 |
-| MQ 桥接实现时机 | 第5层 | 依赖第4层集群模式完成后的 LISTEN/NOTIFY 机制 |
 
-#### 7.3.6 新增错误码
+#### 7.3.5 新增错误码
 
 | 代码 | 类别 | 描述 |
 |------|------|------|
