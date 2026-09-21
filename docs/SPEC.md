@@ -747,25 +747,184 @@ RETURNING current_seq;
 
 无。集群为内部机制，不新增 HTTP 错误码；写入失败沿用 50301。`/healthz`、`/readyz` 语义不变——LISTEN 断开的降级状态通过 WARN 日志观测，不改变健康检查结果（本节点仍可正常服务本地订阅者与发布）。
 
-### 7.5 第4层：速率限制（规格待细化，开发前补齐）
+### 7.5 第4层：速率限制
 
-> 本层已提前为当前开发项（见 7.1 顺序变更记录 2026-09-21）。以下仅为范围界定，接口、验收项与技术决策在开发开始前补齐。
+> 对应 FR-2.8。规划讨论于 2026-09-21 完成，开发项状态见 7.1。
 
-目标（FR-2.8）：对发布路径按「发布者（API Key）」与「频道」两个维度限流，超限返回 42901，保护存储与扇出。
+#### 7.5.1 目标与边界
 
-范围要点：
+目标：对 HTTP 发布入口按「发布者（Key ID）」与「频道」两个维度限流，超限返回 429 + 42901，保护存储与扇出。
 
-- 作用于发布入口：`POST /api/v1/publish`、`POST /api/v2/publish/batch`（Webhook 入站是否计入限流待定）
-- 超限响应：HTTP 429 + 错误码 42901，建议携带 `Retry-After`
-- 第3层集群已落地，限流维度（每节点独立 vs 全局聚合）可基于 7.4 的 LISTEN/NOTIFY 通道决策
-- 限流键复用第1层 Key 模型（Key ID）作为发布者维度
+边界：
 
-待决策项：
+- 仅覆盖 HTTP 发布路径：`POST /api/v1/publish`、`POST /api/v2/publish/batch`。history、管理端点、Webhook 入站不在本层（Webhook 后续再做打算）
+- 每节点独立内存限流：集群下有效限额 ≈ 节点数 × 配置值，不做跨节点协调，零额外 SQL 与连接
+- `rate_limit.enabled: false`（默认）时零额外开销：不创建桶、不启动 sweeper、请求路径直接放行（回归边界）
+- 不做 per-key 差异化配额与按 IP 限流；无效 Key 在认证阶段返回 401，不进入限流
 
-- 算法：令牌桶（允许突发）vs 固定/滑动窗口
-- 配额来源：静态配置 vs 绑定到 `api_keys` 权限模型
-- 存储与聚合：进程内存（每节点独立、重启失效）vs PG（全局一致、写放大）
-- 超限语义：直接拒绝 vs 排队等待；批量子项逐条判定还是整批判定
+#### 7.5.2 模块划分
+
+| 模块 | 变更 |
+|---|---|
+| `internal/ratelimit` | 新增：keyed 令牌桶、两维度检查、空闲回收、拒绝回调与 DEBUG 日志 |
+| `internal/api` | 扩展：`authMiddleware` 将 `KeyValidationResult` 注入 context；发布 handler 调用限流 |
+| `internal/config` | 扩展：`rate_limit` 配置节、校验、浮点环境变量覆盖类型 |
+| `internal/metrics` | 扩展：`aether_rate_limited_total{scope}` counter，以回调形式注入 |
+| `cmd/aether` | 扩展：装配限流器与 sweeper 生命周期 |
+
+依赖方向：`api` 通过自身定义的可选接口（结构匹配）调用限流器，不 import `ratelimit`；`ratelimit` 不依赖任何 Aether 包（除日志与配置数值由 main 注入），与 `cluster.Deliverer` 的装配模式一致。
+
+#### 7.5.3 关键接口
+
+```go
+// --- internal/api ---
+
+// RateLimiter 是 api 侧定义的可选接口，nil = 未启用。
+type RateLimiter interface {
+    // Allow 同时检查发布者与频道两个桶；仅当两者都通过时 ok=true。
+    // 失败时返回 scope（"publisher" | "channel"）与 retryAfter（建议等待时长）。
+    Allow(keyID, channel string) (scope string, retryAfter time.Duration, ok bool)
+}
+
+// ServerConfig 新增字段
+//   RateLimiter RateLimiter
+
+// authMiddleware 将 ValidateAPIKey 的结果写入请求 context，handler 通过内部函数读取。
+
+// --- internal/ratelimit ---
+
+type RateConfig struct {
+    Rate  float64 // 每秒补充令牌数
+    Burst int     // 桶容量（允许的突发量）
+}
+
+type Config struct {
+    Publisher     RateConfig
+    Channel       RateConfig
+    IdleTTL       time.Duration // 桶空闲回收阈值，默认 10m
+    SweepInterval time.Duration // 回收扫描周期，默认 1m
+    OnRejected    func(scope string) // 拒绝回调，可为 nil
+}
+
+func New(cfg Config, logger *slog.Logger) *Limiter
+func (l *Limiter) Allow(keyID, channel string) (scope string, retryAfter time.Duration, ok bool)
+func (l *Limiter) Start(ctx context.Context) // 启动空闲回收 sweeper
+func (l *Limiter) Wait()                     // 等待 sweeper 退出（Allow 不依赖 sweeper，停止后仍可用）
+```
+
+#### 7.5.4 运行机制
+
+**单条发布**：解析 body → 频道校验 → 限流检查 → `hub.Publish`。400/401 等前置失败不消耗配额（未到达限流检查）。
+
+**批次发布**：逐条在 `processBatchMessage` 中检查；超限项 `status = "error"`、`code = 42901`、message 标注 scope，其余条目继续处理（符合 BP-3/BP-5），HTTP 保持 200。Retry-After 仅用于单条发布的 429 响应头，批次逐项结果不携带。
+
+**两桶原子性**：先 `Reserve` 发布者桶——失败则返回 `scope=publisher` 及其 `Delay()`；成功后再 `Reserve` 频道桶——失败则 `Cancel` 发布者预约并返回 `scope=channel`；两者都成功视为放行并消耗令牌。避免频道维度限流误扣发布者桶令牌。
+
+**Retry-After**：失败预约的 `Delay()` 向上取整为整数秒，最小 1。
+
+**桶键与生命周期**：publisher 桶键 = `KeyValidationResult.KeyID`（静态配置 Key 经 bootstrap 迁移后有稳定 UUID）；channel 桶键 = 频道名。键首次出现时按对应配置创建桶并记录 `lastSeen`；sweeper 每周期扫描删除 `lastSeen` 超过 `IdleTTL` 的条目。重建后突发容量复位为文档化边界。
+
+**配额计数语义**：到达限流检查的每个发布请求均消耗配额，含幂等命中重放；单条请求两桶各扣 1。
+
+**集群语义**：每节点独立，进程内状态；不跨节点聚合，文档明确有效限额 ≈ 节点数 × 配置值。
+
+**错误响应**：
+
+```
+HTTP/1.1 429 Too Many Requests
+Retry-After: <seconds>
+
+{ "ok": false, "error": { "code": 42901, "message": "publisher rate limit exceeded" } }
+```
+
+**观测**：拒绝时调用 `OnRejected(scope)` 递增 `aether_rate_limited_total{scope}`，并记 DEBUG 日志（scope、key_id、channel、retry_after）；刻意不用 WARN，避免被刷时日志放大。
+
+**关闭顺序**：HTTP 排空结束后取消 sweeper ctx 并 `Wait()`。`Allow` 不依赖 sweeper，排空期间限流继续生效。
+
+#### 7.5.5 配置
+
+```yaml
+rate_limit:
+  enabled: false
+  publisher:
+    rate: 1000      # 令牌/秒
+    burst: 2000     # 桶容量
+  channel:
+    rate: 2000
+    burst: 4000
+```
+
+环境变量覆盖：`AETHER_RATE_LIMIT_ENABLED`（bool）、`AETHER_RATE_LIMIT_PUBLISHER_RATE`、`AETHER_RATE_LIMIT_PUBLISHER_BURST`、`AETHER_RATE_LIMIT_CHANNEL_RATE`、`AETHER_RATE_LIMIT_CHANNEL_BURST`。`rate` 为浮点，env 覆盖新增 `float` 类型（校验同 `int`）。
+
+校验：`enabled: true` 时四个数值必须 > 0，否则启动报错；`enabled: false` 时不校验数值。
+
+#### 7.5.6 验收项
+
+| # | 验收项 |
+|---|--------|
+| RL-1 | `enabled: false`：不创建限流器、不启动 sweeper，发布路径行为与既有测试一致（回归） |
+| RL-2 | 单条发布超限返回 429 + `Retry-After`（整数秒，≥1）+ 42901，message 区分 publisher/channel |
+| RL-3 | publisher 桶按 Key 隔离：Key A 超限不影响 Key B 发布 |
+| RL-4 | channel 桶按频道隔离且跨 Key 聚合：不同 Key 发布同一频道共享同一配额 |
+| RL-5 | 突发语义：burst 额度内连续放行，耗尽后按 rate 补充 |
+| RL-6 | 两桶独立：仅频道超限时 scope=channel，且发布者桶不因该拒绝被误扣（Reserve/Cancel） |
+| RL-7 | 批次逐条：超限项 per-item 42901、HTTP 200，未超限条目正常成功 |
+| RL-8 | 前置失败不消耗配额：无效 Key（401）、非法频道（400）后，配额仍可用 |
+| RL-9 | 空闲回收：超过 IdleTTL 未使用的桶被 sweep 删除，重建后突发容量复位 |
+| RL-10 | 配置：默认值生效；env 覆盖（含 float 与 bool）；`enabled: true` 且 rate/burst ≤ 0 时启动报错 |
+| RL-11 | 指标 `aether_rate_limited_total{scope="publisher"/"channel"}` 随拒绝递增 |
+| RL-12 | 关闭：sweeper 在 `Wait()` 后退出，无 goroutine 泄漏 |
+
+测试从简：全部为单元测试（无 SQL 依赖，不需要集成测试）；时间敏感断言使用小速率 + 宽松裕量，避免 flaky。
+
+#### 7.5.7 技术决策
+
+| 决策 | 选择 | 理由 |
+|---|---|---|
+| 算法 | 令牌桶，`golang.org/x/time/rate` | 支持突发容量；成熟库避免自研并发热点的正确性风险 |
+| 维度 | publisher 全局桶 + channel 全局桶，相互独立 | 与 FR-2.8 字面一致；分别防单 Key 滥用与热点频道打爆 |
+| 检查位置 | handler 内（非 middleware） | 频道名在 body 中，middleware 需预先读 body 再回填；批次逐条判定也更自然 |
+| Key 标识 | `KeyValidationResult.KeyID`，经 context 注入 | 复用现有认证结果；静态配置 Key 迁移后有稳定 UUID，无需新查询 |
+| 配额来源 | 静态配置全局默认 | 不引入 DB 迁移与管理 API 变更；per-key 覆盖后续按需扩展 |
+| 集群语义 | 每节点独立内存限流 | 零额外 SQL/连接，保住 NFR-2/NFR-3；全局聚合的复杂度与收益不成比例 |
+| 桶回收 | 空闲 TTL 10 分钟 + 每分钟 sweep | 频道名无界必须回收；TTL 内保留突发状态，重建复位为文档化边界 |
+| 两桶原子性 | Reserve + Cancel | 被另一维度拒绝的请求不误扣已通过维度的令牌 |
+| 观测 | counter + DEBUG 日志 | 指标可聚合告警；拒绝属客户端行为，WARN 会在被刷时放大日志 |
+| 覆盖范围 | 仅 HTTP 发布入口 | HTTP 是主要发布入口；Webhook 后续再做打算 |
+
+#### 7.5.8 新增错误码
+
+无新增。使用 PRD 预留的 42901（HTTP 429）。
+
+#### 7.5.9 实现回写（开发后）
+
+实现已完成（v2 第4层，commit ab075d1），与 7.5.1–7.5.8 规划一致，未发生偏离。补充实现细节：
+
+- `internal/ratelimit` 导出 `ScopePublisher` / `ScopeChannel` 常量；两桶 `Reserve` 均成功后放行，任一失败即 `Cancel` 另一桶预约。等待时长由失败预约的 `DelayFrom` 给出，非 OK 预约（突发量不足）回退为按令牌缺口与速率估算。
+- `api.ServerConfig.RateLimiter` 为结构匹配接口（nil = 禁用）；`authMiddleware` 经 context 传递 `KeyValidationResult`，未改动 handler 签名与 `api.New` 参数列表。
+- 单条发布在频道校验后、payload 序列化前检查；`Retry-After` 由 api 层向上取整为整数秒（最小 1）。批次逐条检查，42901 仅出现在 `results[].error`，HTTP 保持 200。
+- `IdleTTL`（10m）与 `SweepInterval`（1m）由 ratelimit 内部默认，不在 YAML 暴露。
+- `metrics.NewRateLimitRejected()` 注册 `aether_rate_limited_total{scope}` 并作为 `OnRejected` 注入，仅在 `enabled: true` 时装配。
+- main 在 HTTP 排空后 `limiterCancel()` + `limiter.Wait()`；`Allow` 不依赖 sweeper，排空期间仍生效。
+
+验证：`go vet ./...` + `go test -count=1 ./...` 全部通过（本地未执行 `-race`，由 CI 负责）。验收项覆盖：
+
+| 验收项 | 覆盖用例 |
+|---|---|
+| RL-1 | 既有 api 测试（`RateLimiter` 为 nil）全量回归 |
+| RL-2 | `TestPublish_RateLimited`（publisher/channel、Retry-After 取整与下限） |
+| RL-3 | `TestAllow_PublisherIsolation` |
+| RL-4 | `TestAllow_ChannelIsolationAndAggregation` |
+| RL-5 | `TestAllow_BurstThenRefill` |
+| RL-6 | `TestAllow_ChannelDenialDoesNotConsumePublisherToken` |
+| RL-7 | `TestBatchPublish_RateLimited` |
+| RL-8 | `TestPublish_RateLimitSkipsInvalidRequests` |
+| RL-9 | `TestSweep_RemovesIdleBuckets`、`TestSweep_KeepsActiveBuckets`、`TestSweep_ResetBurst` |
+| RL-10 | `TestLoad_RateLimitDefaults`、`TestLoad_RateLimitEnvOverride`、`TestLoad_RateLimitEnvOverrideInvalid`、`TestLoad_RateLimitValidate`、`TestLoad_RateLimitDisabledSkipsValidation` |
+| RL-11 | `TestNewRateLimitRejected` |
+| RL-12 | `TestStartWait_StopsOnCancel`；`TestNew_Defaults` 校验 sweeper 默认参数 |
+
+补充用例：`TestPublish_RateLimitAllowsUnderQuota`（配额内放行路径）。
 
 ### 7.6 Presence（规格待细化，推迟）
 
