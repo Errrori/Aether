@@ -113,7 +113,7 @@ func (l *Limiter) Allow(keyID, channel string) (scope string, retryAfter time.Du
 func (l *Limiter) allowAt(keyID, channel string, now time.Time) (scope string, retryAfter time.Duration, ok bool) {
 	pubLim, pubRes := l.publisher.reserve(keyID, now)
 	if delay := pubRes.DelayFrom(now); !pubRes.OK() || delay > 0 {
-		pubRes.Cancel()
+		pubRes.CancelAt(now)
 		retry := denialDelay(pubLim, delay, now)
 		l.reject(ScopePublisher, keyID, channel, retry)
 		return ScopePublisher, retry, false
@@ -121,8 +121,8 @@ func (l *Limiter) allowAt(keyID, channel string, now time.Time) (scope string, r
 
 	chLim, chRes := l.channel.reserve(channel, now)
 	if delay := chRes.DelayFrom(now); !chRes.OK() || delay > 0 {
-		chRes.Cancel()
-		pubRes.Cancel()
+		chRes.CancelAt(now)
+		pubRes.CancelAt(now)
 		retry := denialDelay(chLim, delay, now)
 		l.reject(ScopeChannel, keyID, channel, retry)
 		return ScopeChannel, retry, false
