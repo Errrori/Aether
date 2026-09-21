@@ -15,17 +15,24 @@ import (
 const (
 	clientTypeSubscribe   = "subscribe"
 	clientTypeUnsubscribe = "unsubscribe"
+	clientTypeAck         = "ack"
 )
 
 type subscribeRequest struct {
 	Type     string           `json:"type"`
 	Channels []string         `json:"channels"`
 	AfterSeq map[string]int64 `json:"after_seq"`
+	Resume   bool             `json:"resume"`
 }
 
 type unsubscribeRequest struct {
-	Type     string           `json:"type"`
-	Channels []string         `json:"channels"`
+	Type     string   `json:"type"`
+	Channels []string `json:"channels"`
+}
+
+type ackRequest struct {
+	Type string           `json:"type"`
+	Acks map[string]int64 `json:"acks"`
 }
 
 func readLoop(ac *activeConn, h hub.Hub, maxMessageSize int, wg *sync.WaitGroup) {
@@ -65,7 +72,10 @@ func readLoop(ac *activeConn, h hub.Hub, maxMessageSize int, wg *sync.WaitGroup)
 			}
 			// Subscribe sends its own error frames; the only error it returns
 			// is ErrNilConnection, which cannot occur here since hubCnn is non-nil.
-			_ = h.Subscribe(ac.hubCnn, req.Channels, req.AfterSeq)
+			_ = h.Subscribe(ac.hubCnn, req.Channels, hub.SubscribeOptions{
+				AfterSeq: req.AfterSeq,
+				Resume:   req.Resume,
+			})
 		case clientTypeUnsubscribe:
 			var req unsubscribeRequest
 			if err := json.Unmarshal(data, &req); err != nil {
@@ -73,6 +83,13 @@ func readLoop(ac *activeConn, h hub.Hub, maxMessageSize int, wg *sync.WaitGroup)
 				continue
 			}
 			h.Unsubscribe(ac.hubCnn, req.Channels)
+		case clientTypeAck:
+			var req ackRequest
+			if err := json.Unmarshal(data, &req); err != nil {
+				ac.hubCnn.SendError(hub.ErrCodeInvalidJSON, "invalid ack frame")
+				continue
+			}
+			h.Ack(ac.hubCnn, req.Acks)
 		default:
 			ac.hubCnn.SendError(hub.ErrCodeUnknownFrame, "unknown frame type")
 		}

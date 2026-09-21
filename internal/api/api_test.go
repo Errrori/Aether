@@ -37,11 +37,12 @@ func (h *mockHub) Publish(ctx context.Context, channel string, payload json.RawM
 	return h.seqID, h.timestamp, nil
 }
 
-func (h *mockHub) Subscribe(conn *hub.Connection, channels []string, afterSeq map[string]int64) error {
+func (h *mockHub) Subscribe(conn *hub.Connection, channels []string, opts hub.SubscribeOptions) error {
 	return nil
 }
 func (h *mockHub) Unsubscribe(conn *hub.Connection, channels []string) {}
 func (h *mockHub) RemoveConnection(conn *hub.Connection)                {}
+func (h *mockHub) Ack(conn *hub.Connection, acks map[string]int64)      {}
 
 // --- mockAuth ---
 

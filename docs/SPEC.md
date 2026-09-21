@@ -327,19 +327,23 @@ WHERE updated_at < now() - make_interval(secs => <eviction_interval_seconds>)
 第2层  消息入口    Webhook (FR-2.5) + Batch Publish API (FR-2.4 拆分)          ✅ 已完成
 第3层  扩展       集群模式 (FR-2.2)                                                ✅ 已完成
 第4层  保护       速率限制 (FR-2.8)                                                ✅ 已完成
-第5层  消费体验    SSE (FR-2.9) + 消息确认 (FR-2.6)                                  ← 当前
+第5a层 消费体验    消息确认 (FR-2.6)                                               ← 当前
+第5b层 消费体验    SSE (FR-2.9)                                                    （随后）
 第6层  扩展       Presence (FR-2.3)                                                （推迟）
 ```
 
 顺序变更记录（2026-09-18）：「集群模式 + Presence」与「速率限制」对调（原第3层 ↔ 原第4层）。原因：限流维度的设计（每节点独立 vs 全局聚合）取决于集群形态，先落地集群可避免限流返工。
 
-顺序变更记录（2026-09-21）：Presence (FR-2.3) 从第3层拆出，推迟至第6层；第4层速率限制提前为当前开发项。原因：集群模式（FR-2.2）已完成，限流维度不再依赖未决的集群形态；而 Presence 的聚合机制（7.6）仍需依据集群通道实测表现决策，先做速率限制不阻塞推进。
+顺序变更记录（2026-09-21）：Presence (FR-2.3) 从第3层拆出，推迟至第6层；第4层速率限制提前为当前开发项。原因：集群模式（FR-2.2）已完成，限流维度不再依赖未决的集群形态；而 Presence 的聚合机制（7.7）仍需依据集群通道实测表现决策，先做速率限制不阻塞推进。
+
+顺序变更记录（2026-09-21，第5层拆分）：第5层拆为 5a 消息确认与 5b SSE，5a 先行。原因：ack 主要改动协议与存储，先落地后 SSE 可直接复用确认语义，避免 SSE 二次返工；SSE 不阻塞 ack 验收。
 
 依赖关系：
 - 第1层（Key CRUD）为所有后续层提供认证和权限基础设施
 - 第2层（消息入口）依赖第1层的 Key 管理来验证消息源身份
 - 第3层（集群模式）依赖第1层的 Key 模型可跨节点共享；其前置修复（7.4.6 空频道清理竞态）独立于集群，先行提交
 - 第4层（速率限制）依赖第1层的 Key 标识作为限流维度；第3层集群已落地，可据此确定「每节点独立 vs 全局聚合」的限流维度
+- 第5a层（消息确认）依赖第1层的 JWT `sub` 身份作为游标主键；游标持久化在 PG，跨节点重连可直接恢复；与 5b（SSE）相互独立
 - 第6层（Presence）依赖第3层的集群通道做跨节点聚合
 - Batch Publish API 端点在第2层（消息入口）
 
@@ -573,7 +577,7 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 - 不引入新基础设施（维持 PRD 8.1 的 PG-only 部署形态）
 - `cluster.enabled: false`（默认）时与第2层行为完全一致：不建立 LISTEN 连接、写入路径不产生额外 SQL
 - 扇出为"尽力投递"：NOTIFY 不持久化，断连窗口内遗漏的消息由重连追赶（7.4.4）与客户端 `after_seq` 回放兜底
-- 不在本层范围：Presence（7.6）、节点间 HTTP 转发、跨节点全局限流
+- 不在本层范围：Presence（7.7）、节点间 HTTP 转发、跨节点全局限流
 
 #### 7.4.2 模块划分
 
@@ -928,7 +932,193 @@ rate_limit:
 
 CI 验证：run #64（commit 09bea06）通过，含 `go test -race` 与真实 PostgreSQL 集成测试。期间修复一处 Linux 时钟精度暴露的缺陷：`Reservation.Cancel()` 内部取真实 `time.Now()` 与检查时刻不一致，已改为 `CancelAt(now)`；测试侧将时序敏感用例改为可控时钟（`allowAt`）。
 
-### 7.6 Presence（规格待细化，推迟）
+### 7.6 第5层a：消息确认
+
+> 对应 FR-2.6。规划讨论于 2026-09-21 完成；本层仅消息确认，SSE (FR-2.9) 作为 5b 紧随（见 7.1）。
+
+#### 7.6.1 目标与边界
+
+目标：订阅者通过 `ack` 帧确认已处理的 `(channel, seq_id)`，服务端按「订阅者身份 + 频道」持久化确认游标；重连时客户端以 `resume: true` 从游标处恢复投递，使 at-least-once 消费跨越连接与节点。
+
+边界：
+
+- 仅重连恢复：不做连接内未确认超时重发，实时投递维持 best-effort（会话内窗口漏投由下次 resume 兜底）
+- 游标身份 = JWT `sub`（非连接 ID）；同一订阅者多连接共享游标（文档化边界，见 7.6.4）
+- 游标仅由 `ack` 推进；回放/实时投递不推进持久游标
+- 无跨节点协调：游标持久化在 PG，任意节点 resume 皆可恢复；写路径为每节点内存聚合后批量落盘
+- 不修复「先回放后注册」之间的实时消息漏投窗口（既有行为，本层文档化，见 7.6.4 边界）
+- 不在本层范围：SSE（5b）、游标管理 API、连接内重投
+
+#### 7.6.2 模块划分
+
+| 模块 | 变更 |
+|---|---|
+| `internal/store` | 扩展：迁移 v6（`subscriber_cursors`）、`CursorStore` 可选接口（Load/Save/DeleteStale）、批量单调 UPSERT |
+| `internal/hub` | 扩展：`Hub` 接口增 `Ack`、`Subscribe` 改用 `SubscribeOptions`（新增 `Resume`）；待写游标聚合与后台刷盘（可选生命周期 `Start`/`Wait`）；回放循环改造（分批补投） |
+| `internal/ws` | 扩展：新增客户端帧 `ack`、`subscribe` 帧增 `resume` 字段；测试 mockHub 同步升级 |
+| `internal/config` | 扩展：`ack` 配置节（`cursor_ttl`）与校验、环境变量覆盖 |
+| `internal/metrics` | 扩展：`aether_acks_total` counter（回调注入） |
+| `cmd/aether` | 扩展：装配 hub 刷盘生命周期、驱逐循环内游标清理、关闭顺序插入最终刷盘 |
+
+依赖方向：`hub` 通过可选接口断言使用 `store.CursorStore`（不扩展 `store.Store`，既有 fake 零改动）；`ws` 依赖 `hub.Hub`（签名变更需同步 mock）；`store` 不依赖 `hub`。
+
+#### 7.6.3 关键接口
+
+```go
+// --- internal/store ---
+
+// CursorStore 是可选接口（与 KeyStore / LeaderStore 同模式），由 pgStore 实现。
+type CursorStore interface {
+    // LoadCursors 返回订阅者在给定频道上的持久游标；无记录的频道不出现在结果中。
+    LoadCursors(ctx context.Context, subscriberID string, channels []string) (map[string]int64, error)
+    // SaveCursors 批量 UPSERT，seq_id 取 max（不回退），仅在推进时刷新 updated_at。
+    SaveCursors(ctx context.Context, subscriberID string, cursors map[string]int64) error
+    // DeleteStaleCursors 删除 updated_at 早于 ttl 的行，返回删除行数。
+    DeleteStaleCursors(ctx context.Context, ttl time.Duration) (int64, error)
+}
+
+// --- internal/hub ---
+
+// SubscribeOptions 是订阅选项；AfterSeq 优先于 Resume。
+type SubscribeOptions struct {
+    AfterSeq map[string]int64 // 显式回放锚点：0 = 从最早可用消息回放；省略 = 该频道不追赶
+    Resume   bool             // true = 有持久游标的频道从游标处恢复，无游标等价于不追赶
+}
+
+type Hub interface {
+    Publish(ctx context.Context, channel string, payload json.RawMessage, idempotencyKey *string) (seqID int64, timestamp time.Time, err error)
+    Subscribe(conn *Connection, channels []string, opts SubscribeOptions) error
+    Unsubscribe(conn *Connection, channels []string)
+    RemoveConnection(conn *Connection)
+    Ack(conn *Connection, acks map[string]int64)
+}
+
+// HubConfig 新增字段
+//   AckFlushInterval time.Duration // 待写游标刷盘周期，默认 1s
+
+// 可选生命周期：main 通过类型断言装配（不加入 Hub 接口，避免测试 fake 负担）
+func (h *hubImpl) Start(ctx context.Context) // 启动刷盘循环
+func (h *hubImpl) Wait()                      // 等待最终刷盘退出
+
+// --- internal/ws ---
+
+// subscribeRequest 新增字段：Resume bool `json:"resume"`
+// 新增客户端帧：
+type ackRequest struct {
+    Type string           `json:"type"` // "ack"
+    Acks map[string]int64 `json:"acks"` // channel -> seq_id
+}
+```
+
+#### 7.6.4 运行机制
+
+**ack 处理（ws → hub）**：`readLoop` 解析 `{"type":"ack","acks":{...}}` 后调用 `hub.Ack`。逐频道校验：`seq < 0` 或连接当前未订阅该频道 → error 40007；claims 无权订阅 → error 40301；合法则合并进待写游标。成功静默不回帧；空 `acks` 为合法空操作。
+
+**待写游标聚合（内存）**：`pending map[{subscriberID, channel}]int64`，`pendingMu` 保护。Ack 路径只做 `max` 合并，不直接写库。同一订阅者多连接的 ack 合并在同一键上（共享语义）。
+
+**刷盘（单写者 = flusher goroutine）**：`Start(ctx)` 启动，每 `AckFlushInterval`（默认 1s）或收到断连信号后：快照 pending → 按订阅者分组 `SaveCursors` → 成功后 CAS 删除值未变的条目；失败保留待下轮并记 WARN。`ctx` 取消时以独立超时（5s，不继承已取消 ctx）做最终刷盘后退出，`Wait()` 等待退出。`RemoveConnection` 以非阻塞方式通知 flusher（不阻塞连接清理）。`CursorStore` 未实现时（测试/降级）游标仅驻留内存并支撑本节点 resume，刷盘循环空转退出。
+
+**resume 流程（Subscribe）**：逐频道按优先级处理：
+
+1. 显式 `after_seq[ch]` → 既有回放路径（优先于 resume）
+2. `resume: true` → 批量 `LoadCursors(conn.SubscriberID, 待恢复频道)`；失败 → 该频道回 50001 且不注册（fail-closed，避免客户端误以为已恢复）
+3. 有效锚点 = `max(持久游标, 内存 pending)`；两者都不存在 → 等价于不追赶（纯实时，集群模式仍走 `initClusterCursor`）
+4. 锚点存在 → 从锚点执行回放循环，完成后注册实时投递；回放本身不推进持久游标，客户端后续 ack 才推进
+
+**回放循环（replayHistory 改造）**：从 anchor 起分批 `ReadHistory`（每批 ≤ HistoryLimit）：若 `MinSeq > anchor+1`，发 gap 帧（requested = 连接游标（如有）否则 anchor，available = MinSeq）并将 anchor 推进到 `MinSeq-1`；投递批内消息并推进 anchor 到批内最大 seq；批长不足 limit 或连接已关闭（`conn.Done()`）时结束。消除单批 1000 条截断的静默缺口，同时惠及既有 `after_seq` 路径。
+
+**游标清理**：`runEvictionCycle` 在 leader 锁内、消息驱逐完成后调用 `DeleteStaleCursors(ctx, cfg.Ack.CursorTTL)`（非集群直接执行）；失败记 WARN 且不影响消息驱逐结果。`unsubscribe` 不删除游标——重订阅后才可恢复。
+
+**边界（文档化）**：
+
+- 「先回放、后注册」之间发布的实时消息当次不会投递；但持久游标不因投递推进，该消息 seq 仍大于游标，下次 resume 必然补投（跨重连 at-least-once 成立，会话内为 best-effort）
+- 同一订阅者多连接共享游标：一个连接的 ack 会抬高同身份其他连接的重连起点，可能减少其回放量
+
+**关闭顺序**：`srv.Shutdown`（WebSocket 排空，期间仍可能收到 ack）→ `hubCancel()` + `hub.Wait()`（最终刷盘）→ 既有 limiter 停止；刷盘先于 defer 中的 `st.Close()`。
+
+#### 7.6.5 配置
+
+```yaml
+ack:
+  cursor_ttl: 168h   # 确认游标保留期（默认 7 天），超期由驱逐循环清理
+```
+
+环境变量覆盖：`AETHER_ACK_CURSOR_TTL`（duration）。校验：`cursor_ttl <= 0` 启动报错。刷盘周期为内部默认 1s（`HubConfig.AckFlushInterval`，测试可注入），不在 YAML 暴露。
+
+#### 7.6.6 验收项
+
+| # | 验收项 |
+|---|--------|
+| AK-1 | ack 帧解析：合法批量 ack 成功静默；`seq < 0` 或未订阅频道 → error 40007 且同帧合法项仍生效；未授权 → 40301；畸形 JSON → 40003 |
+| AK-2 | 游标单调：ack 10 后再 ack 5，持久值为 10；重复 ack 幂等 |
+| AK-3 | 聚合刷盘：同一订阅者同频道多次 ack 在刷盘周期内合并（fake CursorStore 断言调用次数与最大值）；SaveCursors 失败保留待重试并记 WARN |
+| AK-4 | pending 参与 resume：ack 后未刷盘即 resume，从内存 pending 恢复（不重放已确认消息） |
+| AK-5 | resume 回放：锚点 X 存在时投递 X+1 起的消息后转实时；显式 `after_seq` 优先于 `resume`；无游标时纯实时且无 gap |
+| AK-6 | 循环补投：离线存量超过 HistoryLimit 时全部补投，无静默截断 |
+| AK-7 | gap：锚点早于保留窗口时先发 gap 帧再投递可用消息 |
+| AK-8 | resume 加载失败：`LoadCursors` 出错时该频道回 50001 且不注册，其余频道不受影响 |
+| AK-9 | 清理：超 TTL 游标行被删除；集群下仅 leader 执行；unsubscribe 不删游标 |
+| AK-10 | 跨节点恢复：A 节点 ack 刷盘后，B 节点 resume 从同一游标恢复（集成测试，真实 PG） |
+| AK-11 | 关闭：WebSocket 排空后执行最终刷盘且 `Wait()` 返回，无 goroutine 泄漏；刷盘先于 store 关闭 |
+| AK-12 | 配置：默认 168h；env 覆盖；`cursor_ttl <= 0` 启动报错 |
+| AK-13 | 回归：不带 ack/resume 的订阅与发布路径行为与既有测试完全一致 |
+
+测试从简：hub 的 ack/resume/刷盘用 fake CursorStore 单元测试；ws 用 mockHub 单元测试；游标 SQL（v6、UPSERT 单调与 updated_at、清理）用真实 PG 集成测试（`//go:build integration`）；跨节点 resume 复用 cluster 集成测试的双节点模式；config 单元测试。
+
+#### 7.6.7 技术决策
+
+| 决策 | 选择 | 理由 |
+|---|---|---|
+| 游标身份 | JWT `sub`，订阅者级共享 | PRD「每订阅者游标」；连接 ID 不跨重连，无法作为恢复键 |
+| 持久化时机 | 内存聚合 + 定时/断连/关闭刷盘 | 逐条 ack 写放大会达到「订阅者数 × 消息数」；游标丢失只导致重放（at-least-once 允许），换取写路径只与变更频道数成正比 |
+| 游标推进 | 仅 ack 帧，`max` 单调 | 未确认消息不得越过；pending 与持久化两个写入路径显式计算最大值 |
+| 恢复触发 | 显式 `resume: true`；显式 `after_seq` 优先 | 保持「省略 after_seq = 纯实时」既有语义；客户端可自行选择是否追赶 |
+| 无游标 resume | 等价不追赶 | 游标行只由 ack 创建，不在订阅时写入「已投递」语义 |
+| 回放截断 | 分批循环至追上或 gap | at-least-once 不能有静默缺口；连接缓冲满会自然终止慢消费者 |
+| 连接内重发 | 不做 | PRD 未要求；需要超时窗口与重发计数，复杂度与收益不成比例 |
+| 多连接 | 共享游标，文档化边界 | 与 PRD 一致；按连接隔离需要可跨重连的消费者标识，协议与存储均需扩展 |
+| 清理 | 驱逐循环 leader 锁内 + 可配 TTL | 复用既有生命周期与 leader 机制；行数随「订阅者 × 频道」有界 |
+| ack 回帧 | 成功静默，失败 error | 减少回程流量；客户端以发送即生效处理 |
+| 漏投窗口 | 本层不修复，文档化 | 控制范围；下次 resume 天然补投（游标不因投递推进） |
+| 接口变更 | `SubscribeOptions` 替代扩展参数；`Ack` 加入 `Hub` | 避免参数列表继续增长；ack 是核心协议能力，应显式契约化 |
+
+#### 7.6.8 新增错误码
+
+WebSocket error 帧新增 `40007`：ack 的频道未订阅或 seq 非法（HTTP 无新增）。PRD 回写（实现提交中同步完成）：5.3 错误码表增 40007；5.2 增 `ack` 帧与 `subscribe.resume` 字段；6.1 增游标持久化实体。
+
+#### 7.6.9 实现回写（开发后）
+
+实现已完成，与 7.6.1–7.6.8 规划一致，未发生偏离。补充实现细节：
+
+- `internal/store`：迁移 v6 建 `subscriber_cursors`（PK `(subscriber_id, channel)` + `updated_at` 索引）；`SaveCursors` 用 `unnest` 单语句批量 UPSERT，`GREATEST` 保证不回退，`updated_at` 仅在推进时刷新；导出 `store.MaxHistoryLimit`（原 `maxHistoryLimit`）供回放分批判定。
+- `internal/hub`：`Hub` 接口 `Subscribe` 改用 `SubscribeOptions{AfterSeq, Resume}` 并新增 `Ack`；`pending map[pendingCursorKey]int64` 以 `max` 合并，flusher 为唯一落盘写者（快照 → 按订阅者分组 `SaveCursors` → CAS 删除值未变条目，失败保留并 WARN）；`RemoveConnection` 非阻塞信号触发刷盘；`replayHistory` 改为分批循环（每批 ≤ `min(HistoryLimit, MaxHistoryLimit)`，gap 后继续投递，`conn.Done()` 提前终止）。
+- resume：批量 `LoadCursors`；加载失败按频道回 50001 且不注册（fail-closed）；有效锚点 = `max(持久游标, 内存 pending)`；无锚点等同不追赶（集群模式仍 `initClusterCursor`）。
+- `internal/ws`：新增 `ack` 帧与 `subscribe.resume`；错误码 `40007`。
+- `internal/config` / `internal/metrics` / `cmd/aether`：`ack.cursor_ttl`（默认 168h，`<=0` 报错）；`aether_acks_total`；`runEvictionCycle` 在 leader 锁内、消息驱逐后执行 `DeleteStaleCursors`（一步失败不跳过另一步）；main 在 WebSocket 排空后取消并 `Wait()` hub flusher（最终刷盘先于 store 关闭）。
+
+验收覆盖：
+
+| 验收项 | 覆盖用例 |
+|---|---|
+| AK-1 | `TestReadLoop_Ack`、`TestReadLoop_MalformedAckFrame`（ws）；`TestHub_Ack_InvalidEntriesRejected`、`TestHub_Ack_UnauthorizedChannel`、`TestHub_Ack_MetricsCountAcceptedOnly`（hub） |
+| AK-2 | `TestHub_Ack_MonotonicAndMergedIntoSingleFlush`；`TestCursorStore_SaveLoadMonotonicAndIsolated`（store 集成） |
+| AK-3 | `TestHub_AckFlush_FailureKeepsPendingAndRetries`、`TestHub_AckFlush_KeepsCursorAdvancedDuringWrite` |
+| AK-4 | `TestHub_Resume_UsesPendingCursorBeyondPersisted`；`TestIntegration_AckResume`（ws 集成，端到端） |
+| AK-5 | `TestHub_Resume_ReplaysAfterPersistedCursor`、`TestHub_Resume_ExplicitAfterSeqWins`、`TestHub_Resume_NoCursorIsLiveOnly` |
+| AK-6 | `TestHub_ReplayHistory_PagesPastSingleBatch` |
+| AK-7 | `TestHub_ReplayHistory_GapThenAvailableMessages` |
+| AK-8 | `TestHub_Resume_LoadErrorFailsClosedPerChannel` |
+| AK-9 | `TestCursorStore_DeleteStale`（store 集成）；清理位于既有 leader 锁分支内（CL-10 机制） |
+| AK-10 | `TestIntegration_CrossNodeResume`（cluster 集成，双节点共享 PG） |
+| AK-11 | `TestHub_Flusher_FinalFlushOnCancel`、`TestHub_Flusher_FlushesOnConnectionRemoval` |
+| AK-12 | `TestLoad_Defaults`、`TestLoad_EnvOverride`、`TestValidate_PositiveConstraints`（config） |
+| AK-13 | 既有测试全量通过（含 `SubscribeOptions` 签名与 mock 回归） |
+
+验证：`go vet ./...`、`go test -count=1 ./...` 全部通过；`go vet -tags integration ./...`、`go test -tags integration -p 1 -count=1 ./...`（真实 PostgreSQL 16，Docker 5433）全部通过。`-race` 由 CI 执行（本地 Windows 环境的 race 运行时不可用，测试二进制启动即失败 `0xc0000139`，与本次改动无关）。
+
+配套文档回写：PRD 5.2 增 `ack` 帧与 `subscribe.resume` 字段（并修正 `after_seq=0` 的既有描述为「从最早可用消息回放」）、5.3 增 40007、6.1 增确认游标实体与关系；`config.example.yaml` 增 `ack.cursor_ttl`。
+
+### 7.7 Presence（规格待细化，推迟）
 
 目标（FR-2.3）：跟踪并暴露每频道在线订阅者，依赖第3层集群通道做跨节点聚合。
 

@@ -142,6 +142,20 @@ func run() error {
 		slog.Info("cluster listener started")
 	}
 
+	// 7b. Acknowledgment cursor flusher: aggregates acks in memory and
+	// persists them in batches. Stopped after the WebSocket drain so the
+	// final flush runs before the deferred store close.
+	hubFlusher, ok := h.(interface {
+		Start(context.Context)
+		Wait()
+	})
+	if !ok {
+		return fmt.Errorf("hub does not implement the cursor flusher lifecycle")
+	}
+	hubFlushCtx, hubFlushCancel := context.WithCancel(context.Background())
+	defer hubFlushCancel()
+	hubFlusher.Start(hubFlushCtx)
+
 	// 8. WebSocket manager.
 	wsm := ws.NewManager(h, au, cfg.WebSocket)
 	slog.Info("websocket manager ready")
@@ -192,7 +206,8 @@ func run() error {
 	srv := api.New(h, au, st, km, ks, whm, wsm, apiCfg)
 
 	// 10. Background tasks: eviction loop. In cluster mode the loop first
-	// acquires the leader lock so exactly one node evicts per cycle.
+	// acquires the leader lock so exactly one node evicts per cycle. Cursor
+	// cleanup runs inside the same leader-gated cycle.
 	var evictLeader store.LeaderStore
 	if cfg.Cluster.Enabled {
 		ls, ok := st.(store.LeaderStore)
@@ -202,12 +217,17 @@ func run() error {
 		evictLeader = ls
 	}
 
+	var cursorStore store.CursorStore
+	if cs, ok := st.(store.CursorStore); ok {
+		cursorStore = cs
+	}
+
 	evictCtx, evictCancel := context.WithCancel(context.Background())
 	defer evictCancel()
 
 	var evictDone sync.WaitGroup
 	evictDone.Add(1)
-	go runEvictionLoop(evictCtx, st, evictLeader, cfg.Retention.EvictionInterval, &evictDone)
+	go runEvictionLoop(evictCtx, st, evictLeader, cursorStore, cfg.Ack.CursorTTL, cfg.Retention.EvictionInterval, &evictDone)
 
 	// 11. Start the HTTP server in a goroutine.
 	serverErr := make(chan error, 1)
@@ -254,6 +274,11 @@ func run() error {
 	if limiter != nil {
 		limiter.Wait()
 	}
+
+	// Stop the cursor flusher after the WebSocket drain (its last acks) and
+	// before the deferred store close so the final flush can persist.
+	hubFlushCancel()
+	hubFlusher.Wait()
 	slog.Info("shutdown complete")
 	return nil
 }
@@ -280,7 +305,7 @@ func setupLogging(cfg config.LogConfig) {
 	slog.SetDefault(slog.New(h))
 }
 
-func runEvictionLoop(ctx context.Context, s store.Store, leader store.LeaderStore, interval time.Duration, done *sync.WaitGroup) {
+func runEvictionLoop(ctx context.Context, s store.Store, leader store.LeaderStore, cursorStore store.CursorStore, cursorTTL, interval time.Duration, done *sync.WaitGroup) {
 	defer done.Done()
 
 	ticker := time.NewTicker(interval)
@@ -292,7 +317,7 @@ func runEvictionLoop(ctx context.Context, s store.Store, leader store.LeaderStor
 			slog.Debug("eviction loop stopped")
 			return
 		case <-ticker.C:
-			runEvictionCycle(ctx, s, leader)
+			runEvictionCycle(ctx, s, leader, cursorStore, cursorTTL)
 		}
 	}
 }
@@ -300,7 +325,7 @@ func runEvictionLoop(ctx context.Context, s store.Store, leader store.LeaderStor
 // runEvictionCycle runs one eviction round. In cluster mode (leader != nil) it
 // first acquires the leader lock, so nodes that lose the race skip the round
 // instead of evicting concurrently.
-func runEvictionCycle(ctx context.Context, s store.Store, leader store.LeaderStore) {
+func runEvictionCycle(ctx context.Context, s store.Store, leader store.LeaderStore, cursorStore store.CursorStore, cursorTTL time.Duration) {
 	if leader != nil {
 		lock, err := leader.TryEvictionLock(ctx)
 		if err != nil {
@@ -323,6 +348,17 @@ func runEvictionCycle(ctx context.Context, s store.Store, leader store.LeaderSto
 		slog.Warn("eviction cycle failed", "err", err)
 	} else if channels > 0 || msgs > 0 {
 		slog.Info("eviction completed", "channels_cleaned", channels, "messages_evicted", msgs)
+	}
+
+	// Stale cursor cleanup runs regardless of the message eviction outcome:
+	// both steps are independent and a failure in one must not skip the other.
+	if cursorStore != nil {
+		removed, err := cursorStore.DeleteStaleCursors(ctx, cursorTTL)
+		if err != nil {
+			slog.Warn("cursor cleanup failed", "err", err)
+		} else if removed > 0 {
+			slog.Info("cursor cleanup completed", "cursors_removed", removed)
+		}
 	}
 }
 

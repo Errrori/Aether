@@ -172,7 +172,7 @@ func assertNoFrame(t *testing.T, conn *Connection) {
 func TestHub_Publish_PersistsAndFansOut(t *testing.T) {
 	h, _ := newTestHub(t)
 	conn := newTestConnection(t, "c1")
-	h.Subscribe(conn, []string{"ch"}, nil)
+	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{})
 	drainFrame(t, conn) // consume subscribed ack
 
 	payload := json.RawMessage(`{"msg":"hello"}`)
@@ -198,7 +198,7 @@ func TestHub_Publish_PersistsAndFansOut(t *testing.T) {
 func TestHub_Publish_StoreErrorReturnsError(t *testing.T) {
 	h, store := newTestHub(t)
 	conn := newTestConnection(t, "c1")
-	h.Subscribe(conn, []string{"ch"}, nil)
+	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{})
 	drainFrame(t, conn) // subscribed ack
 
 	store.writeErr = context.DeadlineExceeded
@@ -220,7 +220,7 @@ func TestHub_ConcurrentPublishAndSubscribe(t *testing.T) {
 	conns := make([]*Connection, 20)
 	for i := 0; i < 20; i++ {
 		conns[i] = newTestConnection(t, fmt.Sprintf("c%d", i))
-		h.Subscribe(conns[i], []string{"ch"}, nil)
+		h.Subscribe(conns[i], []string{"ch"}, SubscribeOptions{})
 		drainFrame(t, conns[i]) // consume subscribed ack
 	}
 
@@ -249,7 +249,7 @@ func TestHub_Publish_BufferFullClosesConnection(t *testing.T) {
 	conn.Overflow = func() { overflowCalled = true }
 
 	// Subscribe fills the buffer (subscribed ack occupies the only slot).
-	h.Subscribe(conn, []string{"ch"}, nil)
+	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{})
 
 	// Publish — buffer is still full from the subscribed frame.
 	h.Publish(context.Background(), "ch", json.RawMessage(`"x"`), nil)
@@ -265,10 +265,10 @@ func TestHub_Subscribe_DuplicateIsIgnored(t *testing.T) {
 	h, _ := newTestHub(t)
 	conn := newTestConnection(t, "c1")
 
-	h.Subscribe(conn, []string{"ch"}, nil)
+	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{})
 	drainFrame(t, conn) // first subscribed: ["ch"]
 
-	h.Subscribe(conn, []string{"ch"}, nil)
+	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{})
 	drainFrame(t, conn) // second subscribed: [] (duplicate skipped)
 
 	if conn.ChannelCount() != 1 {
@@ -286,7 +286,7 @@ func TestHub_Subscribe_HistoryBeforeRealTime(t *testing.T) {
 	h.Publish(context.Background(), "ch", json.RawMessage(`"h2"`), nil)
 
 	conn := newTestConnection(t, "c1")
-	h.Subscribe(conn, []string{"ch"}, map[string]int64{"ch": 0})
+	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{AfterSeq: map[string]int64{"ch": 0}})
 
 	// Should receive: history msg 1, history msg 2, subscribed ack (in that order).
 	f1 := drainFrame(t, conn)
@@ -324,7 +324,7 @@ func TestHub_Subscribe_GapDetection(t *testing.T) {
 	h.Publish(context.Background(), "ch", json.RawMessage(`"m3"`), nil)
 
 	conn := newTestConnection(t, "c1")
-	h.Subscribe(conn, []string{"ch"}, map[string]int64{"ch": -1})
+	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{AfterSeq: map[string]int64{"ch": -1}})
 
 	// First frame should be a gap frame.
 	f1 := drainFrame(t, conn)
@@ -343,7 +343,7 @@ func TestHub_Subscribe_TooManyPerRequest(t *testing.T) {
 	for i := range channels {
 		channels[i] = fmt.Sprintf("ch%d", i)
 	}
-	h.Subscribe(conn, channels, nil)
+	h.Subscribe(conn, channels, SubscribeOptions{})
 
 	data := drainFrame(t, conn)
 	if !strings.Contains(string(data), "40005") {
@@ -356,11 +356,11 @@ func TestHub_Subscribe_TotalLimitExceeded(t *testing.T) {
 	h.config.MaxChannelsPerConn = 3
 	conn := newTestConnection(t, "c1")
 
-	h.Subscribe(conn, []string{"a", "b"}, nil)
+	h.Subscribe(conn, []string{"a", "b"}, SubscribeOptions{})
 	drainFrame(t, conn) // subscribed ack for [a, b]
 
 	// Now try to subscribe to 2 more (would exceed 3).
-	h.Subscribe(conn, []string{"c", "d"}, nil)
+	h.Subscribe(conn, []string{"c", "d"}, SubscribeOptions{})
 	data := drainFrame(t, conn)
 	if !strings.Contains(string(data), "40006") {
 		t.Errorf("expected error code 40006, got %s", string(data))
@@ -376,7 +376,7 @@ func TestHub_Subscribe_UnauthorizedChannel(t *testing.T) {
 	h.auth = ma
 
 	conn := newTestConnection(t, "c1")
-	h.Subscribe(conn, []string{"public", "secret"}, nil)
+	h.Subscribe(conn, []string{"public", "secret"}, SubscribeOptions{})
 
 	// Should get error frame for "secret".
 	data := drainFrame(t, conn)
@@ -403,7 +403,7 @@ func TestHub_Unsubscribe(t *testing.T) {
 	h, _ := newTestHub(t)
 	conn := newTestConnection(t, "c1")
 
-	h.Subscribe(conn, []string{"a", "b"}, nil)
+	h.Subscribe(conn, []string{"a", "b"}, SubscribeOptions{})
 	drainFrame(t, conn) // subscribed ack
 
 	h.Unsubscribe(conn, []string{"a"})
@@ -428,7 +428,7 @@ func TestHub_RemoveConnection(t *testing.T) {
 	h, _ := newTestHub(t)
 	conn := newTestConnection(t, "c1")
 
-	h.Subscribe(conn, []string{"a", "b"}, nil)
+	h.Subscribe(conn, []string{"a", "b"}, SubscribeOptions{})
 	drainFrame(t, conn) // subscribed ack
 
 	h.RemoveConnection(conn)
@@ -465,7 +465,7 @@ func TestHub_Subscribe_InvalidChannelName(t *testing.T) {
 	h, _ := newTestHub(t)
 	conn := newTestConnection(t, "c1")
 
-	h.Subscribe(conn, []string{""}, nil)
+	h.Subscribe(conn, []string{""}, SubscribeOptions{})
 	data := drainFrame(t, conn)
 	if !strings.Contains(string(data), "40001") {
 		t.Errorf("expected error code 40001 for invalid channel, got %s", string(data))

@@ -70,6 +70,9 @@ auth:
 	if cfg.Retention.EvictionInterval != 5*time.Minute {
 		t.Errorf("Retention.EvictionInterval = %v, want 5m", cfg.Retention.EvictionInterval)
 	}
+	if cfg.Ack.CursorTTL != 168*time.Hour {
+		t.Errorf("Ack.CursorTTL = %v, want 168h", cfg.Ack.CursorTTL)
+	}
 	if cfg.Shutdown.Timeout != 10*time.Second {
 		t.Errorf("Shutdown.Timeout = %v, want 10s", cfg.Shutdown.Timeout)
 	}
@@ -150,6 +153,7 @@ auth:
 	t.Setenv("AETHER_WEBSOCKET_PING_INTERVAL", "15s")
 	t.Setenv("AETHER_AUTH_JWT_CLOCK_SKEW", "1m")
 	t.Setenv("AETHER_RETENTION_DEFAULT_MAX_COUNT", "5000")
+	t.Setenv("AETHER_ACK_CURSOR_TTL", "24h")
 
 	cfg, err := Load(path)
 	if err != nil {
@@ -176,6 +180,9 @@ auth:
 	}
 	if cfg.Retention.DefaultMaxCount != 5000 {
 		t.Errorf("DefaultMaxCount not overridden, got %d", cfg.Retention.DefaultMaxCount)
+	}
+	if cfg.Ack.CursorTTL != 24*time.Hour {
+		t.Errorf("Ack.CursorTTL not overridden, got %v", cfg.Ack.CursorTTL)
 	}
 }
 
@@ -271,6 +278,11 @@ func TestValidate_PositiveConstraints(t *testing.T) {
 			name:    "eviction_interval zero",
 			modify:  func(c *Config) { c.Retention.EvictionInterval = 0 },
 			wantErr: "retention.eviction_interval must be positive",
+		},
+		{
+			name:    "cursor_ttl zero",
+			modify:  func(c *Config) { c.Ack.CursorTTL = 0 },
+			wantErr: "ack.cursor_ttl must be positive",
 		},
 		{
 			name:    "shutdown timeout zero",

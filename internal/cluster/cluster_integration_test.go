@@ -86,7 +86,7 @@ func integNewConn(t *testing.T, id string) *hub.Connection {
 
 func integSubscribe(t *testing.T, h hub.Hub, conn *hub.Connection, channel string) {
 	t.Helper()
-	if err := h.Subscribe(conn, []string{channel}, nil); err != nil {
+	if err := h.Subscribe(conn, []string{channel}, hub.SubscribeOptions{}); err != nil {
 		t.Fatalf("Subscribe to %s: %v", channel, err)
 	}
 }
@@ -400,6 +400,66 @@ func TestIntegration_ConcurrentPublishBothNodes(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestIntegration_CrossNodeResume covers AK-10: a cursor acked on node A and
+// persisted to shared PostgreSQL is used by a resume subscription on node B.
+func TestIntegration_CrossNodeResume(t *testing.T) {
+	ctx := context.Background()
+
+	stA := integNewClusterStore(t, "reso-a")
+	stB := integNewClusterStore(t, "reso-b")
+	hubA := integNewHub(t, stA, "reso-a")
+	hubB := integNewHub(t, stB, "reso-b")
+
+	const ch = "int.resume"
+	for i := 0; i < 5; i++ {
+		if _, _, err := hubA.Publish(ctx, ch, json.RawMessage(`{"n":1}`), nil); err != nil {
+			t.Fatalf("publish %d: %v", i, err)
+		}
+	}
+
+	connA := integNewConn(t, "reso-a1")
+	integSubscribe(t, hubA, connA, ch)
+	integDrainFrame(t, connA, time.Second) // subscribed confirmation
+
+	hubA.Ack(connA, map[string]int64{ch: 3})
+
+	// Force the final flush: the default flush interval is 1s, cancelling the
+	// flusher context triggers the shutdown flush.
+	flusher, ok := hubA.(interface {
+		Start(context.Context)
+		Wait()
+	})
+	if !ok {
+		t.Fatal("hub does not implement the flusher lifecycle")
+	}
+	flushCtx, flushCancel := context.WithCancel(context.Background())
+	flusher.Start(flushCtx)
+	flushCancel()
+	flusher.Wait()
+
+	persisted, err := stA.(store.CursorStore).LoadCursors(ctx, connA.SubscriberID, []string{ch})
+	if err != nil {
+		t.Fatalf("load persisted cursor: %v", err)
+	}
+	if persisted[ch] != 3 {
+		t.Fatalf("persisted cursor = %d, want 3", persisted[ch])
+	}
+
+	// Reconnect on the other node with the same subscriber identity.
+	connB := hub.NewConnection("reso-b1", connA.SubscriberID,
+		&auth.Claims{Subject: connA.SubscriberID, Channels: []string{"*"}}, 256)
+	if err := hubB.Subscribe(connB, []string{ch}, hub.SubscribeOptions{Resume: true}); err != nil {
+		t.Fatalf("resume on node B: %v", err)
+	}
+	for want := int64(4); want <= 5; want++ {
+		mf := integReceiveMessage(t, connB, 2*time.Second)
+		if mf.SeqID != want {
+			t.Fatalf("resumed seq = %d, want %d", mf.SeqID, want)
+		}
+	}
+	integDrainFrame(t, connB, time.Second) // subscribed confirmation
 }
 
 // TestIntegration_RunReturnsAfterCancel covers CL-12: Run must return promptly

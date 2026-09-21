@@ -370,8 +370,68 @@ func TestIntegration_Subscribe_HistoryReplay(t *testing.T) {
 	}
 }
 
-func TestIntegration_Subscribe_GapDetection(t *testing.T) {
+// TestIntegration_AckResume covers the end-to-end ack path over WebSocket:
+// a reconnecting client resumes from the acknowledgment cursor tracked by the
+// server, so replayed messages start after the last acked seq.
+func TestIntegration_AckResume(t *testing.T) {
 	_, ts, h, _ := integNewTestServer(t)
+	ch := "int-ws-" + t.Name()
+	token := integGenerateToken(t, "ack-sub", []string{"*"}, time.Hour)
+
+	// History present before the first subscription.
+	for i := 0; i < 5; i++ {
+		integPublish(t, h, ch, json.RawMessage(`"old"`))
+	}
+
+	conn1 := integDial(t, ts, token)
+	integSubscribe(t, conn1, []string{ch}, nil) // live-only
+
+	// Messages delivered live in this session.
+	for i := 0; i < 3; i++ {
+		integPublish(t, h, ch, json.RawMessage(`"live"`))
+	}
+	for want := int64(6); want <= 8; want++ {
+		frame := integReadFrame(t, conn1, 5*time.Second)
+		if frame["type"] != "message" {
+			t.Fatalf("expected message, got %v", frame["type"])
+		}
+		if seq, _ := frame["seq_id"].(float64); int64(seq) != want {
+			t.Fatalf("live seq = %v, want %d", frame["seq_id"], want)
+		}
+	}
+
+	// Ack through seq 7 (simulating processing), then reconnect.
+	integWriteJSON(t, conn1, map[string]any{
+		"type": "ack",
+		"acks": map[string]int64{ch: 7},
+	})
+	if err := conn1.Close(websocket.StatusNormalClosure, "reconnect"); err != nil {
+		t.Fatalf("close conn1: %v", err)
+	}
+
+	conn2 := integDial(t, ts, token)
+	integWriteJSON(t, conn2, map[string]any{
+		"type":     "subscribe",
+		"channels": []string{ch},
+		"resume":   true,
+	})
+
+	// Only the unacked live message (seq 8) is replayed; history before the
+	// first subscription is never replayed because the cursor only moves on ack.
+	frame := integReadFrame(t, conn2, 5*time.Second)
+	if frame["type"] != "message" {
+		t.Fatalf("expected resumed message, got %v", frame["type"])
+	}
+	if seq, _ := frame["seq_id"].(float64); int64(seq) != 8 {
+		t.Fatalf("resumed seq = %v, want 8", frame["seq_id"])
+	}
+	subscribed := integReadFrame(t, conn2, 5*time.Second)
+	if subscribed["type"] != "subscribed" {
+		t.Fatalf("expected subscribed after resume replay, got %v", subscribed["type"])
+	}
+}
+
+func TestIntegration_Subscribe_GapDetection(t *testing.T) {	_, ts, h, _ := integNewTestServer(t)
 	ch := "int-ws-" + t.Name()
 	token := integGenerateToken(t, "sub", []string{"*"}, time.Hour)
 

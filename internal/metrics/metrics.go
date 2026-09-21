@@ -35,6 +35,10 @@ func New() hub.Metrics {
 		Help:    "Storage write latency in seconds.",
 		Buckets: prometheus.DefBuckets,
 	})
+	acksReceived := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "aether_acks_total",
+		Help: "Total number of accepted subscriber acknowledgments.",
+	})
 
 	prometheus.MustRegister(
 		connectionsActive,
@@ -43,6 +47,7 @@ func New() hub.Metrics {
 		messagesPushed,
 		publishDuration,
 		storageWriteDuration,
+		acksReceived,
 	)
 
 	return hub.Metrics{
@@ -69,6 +74,9 @@ func New() hub.Metrics {
 		},
 		ObserveStorageWrite: func(channel string, d float64) {
 			storageWriteDuration.Observe(d)
+		},
+		IncAcks: func() {
+			acksReceived.Inc()
 		},
 	}
 }

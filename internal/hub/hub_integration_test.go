@@ -128,7 +128,7 @@ func integPublish(t *testing.T, h Hub, ctx context.Context, channel string, payl
 // integSubscribe is a helper that calls Subscribe and fails the test on error.
 func integSubscribe(t *testing.T, h Hub, conn *Connection, channels []string, afterSeq map[string]int64) {
 	t.Helper()
-	if err := h.Subscribe(conn, channels, afterSeq); err != nil {
+	if err := h.Subscribe(conn, channels, SubscribeOptions{AfterSeq: afterSeq}); err != nil {
 		t.Fatalf("Subscribe to %v: %v", channels, err)
 	}
 }

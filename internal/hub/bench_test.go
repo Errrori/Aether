@@ -33,7 +33,7 @@ func BenchmarkPublish_WithSubscribers(b *testing.B) {
 
 	for i := 0; i < 10; i++ {
 		conn := newTestConnection(b, fmt.Sprintf("bench-conn-%d", i))
-		h.Subscribe(conn, []string{"bench.ch"}, nil)
+		h.Subscribe(conn, []string{"bench.ch"}, SubscribeOptions{})
 		// Consume subscribed ack frame.
 		select {
 		case <-conn.Send:

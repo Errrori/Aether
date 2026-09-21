@@ -13,13 +13,14 @@ const (
 
 // Error codes sent to clients.
 const (
-	ErrCodeInvalidChannel  = 40001
-	ErrCodeInvalidJSON     = 40003
-	ErrCodeUnknownFrame    = 40004
-	ErrCodeUnauthorized    = 40301
-	ErrCodeTooManyPerReq   = 40005
-	ErrCodeTooManyPerConn  = 40006
-	ErrCodeHistoryFailed   = 50001
+	ErrCodeInvalidChannel = 40001
+	ErrCodeInvalidJSON    = 40003
+	ErrCodeUnknownFrame   = 40004
+	ErrCodeUnauthorized   = 40301
+	ErrCodeTooManyPerReq  = 40005
+	ErrCodeTooManyPerConn = 40006
+	ErrCodeInvalidAck     = 40007
+	ErrCodeHistoryFailed  = 50001
 )
 
 // MessageFrame pushes a real-time message to a subscriber.

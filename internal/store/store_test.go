@@ -122,7 +122,7 @@ func backdateChannel(t *testing.T, s *pgStore, channel string, age time.Duration
 func TestRunMigrations_EmptyDB(t *testing.T) {
 	s := newTestStore(t)
 
-	tables := []string{"channels", "messages", "api_keys", "webhooks", "webhook_deliveries", "schema_migrations"}
+	tables := []string{"channels", "messages", "api_keys", "webhooks", "webhook_deliveries", "subscriber_cursors", "schema_migrations"}
 	for _, tbl := range tables {
 		var exists bool
 		err := s.pool.QueryRow(context.Background(),
@@ -168,7 +168,7 @@ func TestRunMigrations_VersionTracking(t *testing.T) {
 		}
 		versions = append(versions, v)
 	}
-	if want := []int{1, 2, 3, 4, 5}; !slices.Equal(versions, want) {
+	if want := []int{1, 2, 3, 4, 5, 6}; !slices.Equal(versions, want) {
 		t.Fatalf("expected versions %v, got %v", want, versions)
 	}
 }

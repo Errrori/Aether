@@ -9,7 +9,7 @@ import (
 	"github.com/aether-mq/aether/internal/store"
 )
 
-func (h *hubImpl) Subscribe(conn *Connection, channels []string, afterSeq map[string]int64) error {
+func (h *hubImpl) Subscribe(conn *Connection, channels []string, opts SubscribeOptions) error {
 	if conn == nil {
 		return ErrNilConnection
 	}
@@ -26,6 +26,7 @@ func (h *hubImpl) Subscribe(conn *Connection, channels []string, afterSeq map[st
 		channel  string
 		afterSeq int64
 		hasAfter bool
+		resume   bool
 	}
 	var pending []pendingSub
 
@@ -42,9 +43,11 @@ func (h *hubImpl) Subscribe(conn *Connection, channels []string, afterSeq map[st
 			continue // H-6: duplicate subscribe is silently ignored.
 		}
 		ps := pendingSub{channel: ch}
-		if seq, ok := afterSeq[ch]; ok {
+		if seq, ok := opts.AfterSeq[ch]; ok {
 			ps.hasAfter = true
 			ps.afterSeq = seq
+		} else if opts.Resume {
+			ps.resume = true
 		}
 		pending = append(pending, ps)
 	}
@@ -61,11 +64,49 @@ func (h *hubImpl) Subscribe(conn *Connection, channels []string, afterSeq map[st
 		return nil
 	}
 
-	// H-7: replay history for channels with after_seq BEFORE registering for real-time.
+	// Load persisted acknowledgment cursors for all resume channels in one
+	// query. A load failure fails closed below: silently falling back to
+	// live-only would make the client believe it missed nothing.
+	var resumeCursors map[string]int64
+	var resumeErr error
+	if opts.Resume && h.cursorStore != nil {
+		var resumeChans []string
+		for _, ps := range pending {
+			if ps.resume {
+				resumeChans = append(resumeChans, ps.channel)
+			}
+		}
+		if len(resumeChans) > 0 {
+			resumeCursors, resumeErr = h.cursorStore.LoadCursors(
+				context.Background(), conn.SubscriberID, resumeChans)
+			if resumeErr != nil {
+				slog.Warn("cursor load failed",
+					"subscriber_id", conn.SubscriberID, "channels", len(resumeChans), "err", resumeErr)
+			}
+		}
+	}
+
+	// H-7: replay history for channels with an anchor BEFORE registering for
+	// real-time. Explicit after_seq wins over resume per channel.
 	var registered []string
 	for _, ps := range pending {
-		if ps.hasAfter {
-			if err := h.replayHistory(conn, ps.channel, ps.afterSeq); err != nil {
+		anchor := ps.afterSeq
+		shouldReplay := ps.hasAfter
+		if ps.resume {
+			if resumeErr != nil {
+				conn.SendError(ErrCodeHistoryFailed,
+					fmt.Sprintf("cursor load failed for %s: %v", ps.channel, resumeErr))
+				continue
+			}
+			anchor = resumeCursors[ps.channel]
+			if pendingSeq := h.pendingCursor(conn.SubscriberID, ps.channel); pendingSeq > anchor {
+				anchor = pendingSeq
+			}
+			shouldReplay = anchor > 0
+		}
+
+		if shouldReplay {
+			if err := h.replayHistory(conn, ps.channel, anchor); err != nil {
 				conn.SendError(ErrCodeHistoryFailed,
 					fmt.Sprintf("history read failed for %s: %v", ps.channel, err))
 				continue
@@ -124,50 +165,73 @@ func (h *hubImpl) Subscribe(conn *Connection, channels []string, afterSeq map[st
 	return nil
 }
 
+// replayHistory delivers messages after afterSeq in batches until the history
+// is exhausted (or the connection closes). Batching removes the silent
+// truncation of a single capped ReadHistory call: a client resuming far
+// behind receives everything still retained, preceded by a gap frame when
+// the retention window has already passed its anchor.
 func (h *hubImpl) replayHistory(conn *Connection, channel string, afterSeq int64) error {
-	result, err := h.store.ReadHistory(context.Background(), channel, afterSeq, h.config.HistoryLimit)
-	if err != nil {
-		return err
+	limit := h.config.HistoryLimit
+	if limit > store.MaxHistoryLimit {
+		limit = store.MaxHistoryLimit
 	}
 
-	// H-8, H-9: Gap detection — if after_seq is before the earliest available message,
-	// there are messages the client can never receive.
-	if afterSeq < result.MinSeq-1 {
-		h.sendGap(conn, channel, afterSeq, result.MinSeq)
-	}
-
-	maxSeq := afterSeq
-	for _, msg := range result.Messages {
-		frame := MessageFrame{
-			Type:      FrameTypeMessage,
-			Channel:   channel,
-			SeqID:     msg.SeqID,
-			Timestamp: msg.CreatedAt.Format(time.RFC3339Nano),
-			Payload:   msg.Payload,
-		}
-		data, err := MarshalFrame(frame)
-		if err != nil {
-			// MarshalFrame failure for a message is non-recoverable:
-			// update maxSeq anyway so the cursor does not lie about delivery.
-			if msg.SeqID > maxSeq {
-				maxSeq = msg.SeqID
-			}
-			continue
-		}
+	anchor := afterSeq
+	for {
 		select {
-		case conn.Send <- data:
-		default:
-			conn.Close()
+		case <-conn.Done():
 			return fmt.Errorf("connection closed during history replay")
+		default:
 		}
-		if msg.SeqID > maxSeq {
-			maxSeq = msg.SeqID
+
+		result, err := h.store.ReadHistory(context.Background(), channel, anchor, limit)
+		if err != nil {
+			return err
+		}
+
+		// H-8, H-9: Gap detection — if the anchor is before the earliest
+		// available message, the client can never receive those seqs.
+		if result.MinSeq > anchor+1 {
+			h.sendGap(conn, channel, anchor, result.MinSeq)
+			anchor = result.MinSeq - 1
+		}
+
+		for _, msg := range result.Messages {
+			frame := MessageFrame{
+				Type:      FrameTypeMessage,
+				Channel:   channel,
+				SeqID:     msg.SeqID,
+				Timestamp: msg.CreatedAt.Format(time.RFC3339Nano),
+				Payload:   msg.Payload,
+			}
+			data, err := MarshalFrame(frame)
+			if err != nil {
+				// MarshalFrame failure for a message is non-recoverable:
+				// update the anchor anyway so the cursor does not lie about delivery.
+				if msg.SeqID > anchor {
+					anchor = msg.SeqID
+				}
+				continue
+			}
+			select {
+			case conn.Send <- data:
+			default:
+				conn.Close()
+				return fmt.Errorf("connection closed during history replay")
+			}
+			if msg.SeqID > anchor {
+				anchor = msg.SeqID
+			}
+		}
+
+		if len(result.Messages) < limit {
+			break
 		}
 	}
 
-	conn.SetCursor(channel, maxSeq)
+	conn.SetCursor(channel, anchor)
 	if h.config.NodeID != "" {
-		h.advanceNodeCursor(channel, maxSeq)
+		h.advanceNodeCursor(channel, anchor)
 	}
 	return nil
 }
@@ -245,6 +309,10 @@ func (h *hubImpl) RemoveConnection(conn *Connection) {
 	if h.metrics.DecConnections != nil {
 		h.metrics.DecConnections()
 	}
+
+	// Persist any acks this connection made before it dropped; the signal is
+	// non-blocking so connection teardown never waits on the flusher.
+	h.signalFlush()
 }
 
 // --- helpers for sending frames to a connection ---

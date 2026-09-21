@@ -13,7 +13,7 @@ import (
 // sequences. schema_migrations is left intact so migration state is kept.
 // Keep the table list in sync with migrations: a table missing here leaks
 // rows across test cases without any assertion noticing.
-const TruncateStmt = `TRUNCATE webhook_deliveries, webhooks, api_keys, messages, channels RESTART IDENTITY CASCADE`
+const TruncateStmt = `TRUNCATE subscriber_cursors, webhook_deliveries, webhooks, api_keys, messages, channels RESTART IDENTITY CASCADE`
 
 // TruncateAll executes TruncateStmt on the database at dsn. Integration test
 // suites call it so every test starts from a clean schema, independent of

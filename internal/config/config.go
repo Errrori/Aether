@@ -26,6 +26,7 @@ type Config struct {
 	WebSocket WebSocketConfig `yaml:"websocket"`
 	Cluster   ClusterConfig   `yaml:"cluster"`
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
+	Ack       AckConfig       `yaml:"ack"`
 	Retention RetentionConfig `yaml:"retention"`
 	Shutdown  ShutdownConfig  `yaml:"shutdown"`
 	Log       LogConfig       `yaml:"log"`
@@ -90,6 +91,13 @@ type RateLimitRule struct {
 	Burst int     `yaml:"burst"`
 }
 
+// AckConfig controls subscriber acknowledgment cursors. CursorTTL bounds how
+// long a cursor is kept after its last advance; expired rows are removed by
+// the eviction loop.
+type AckConfig struct {
+	CursorTTL time.Duration `yaml:"cursor_ttl"`
+}
+
 type RetentionRule struct {
 	Pattern  string        `yaml:"pattern"`
 	TTL      time.Duration `yaml:"ttl"`
@@ -140,6 +148,9 @@ func defaultConfig() *Config {
 		RateLimit: RateLimitConfig{
 			Publisher: RateLimitRule{Rate: 1000, Burst: 2000},
 			Channel:   RateLimitRule{Rate: 2000, Burst: 4000},
+		},
+		Ack: AckConfig{
+			CursorTTL: 168 * time.Hour,
 		},
 		Retention: RetentionConfig{
 			DefaultTTL:      720 * time.Hour,
@@ -219,6 +230,8 @@ func applyEnvOverrides(cfg *Config) error {
 		{"AETHER_RATE_LIMIT_PUBLISHER_BURST", &cfg.RateLimit.Publisher.Burst, "int"},
 		{"AETHER_RATE_LIMIT_CHANNEL_RATE", &cfg.RateLimit.Channel.Rate, "float"},
 		{"AETHER_RATE_LIMIT_CHANNEL_BURST", &cfg.RateLimit.Channel.Burst, "int"},
+		// ack
+		{"AETHER_ACK_CURSOR_TTL", &cfg.Ack.CursorTTL, "duration"},
 		// retention
 		{"AETHER_RETENTION_DEFAULT_TTL", &cfg.Retention.DefaultTTL, "duration"},
 		{"AETHER_RETENTION_DEFAULT_MAX_COUNT", &cfg.Retention.DefaultMaxCount, "int"},
@@ -343,6 +356,10 @@ func (c *Config) Validate() error {
 		if c.RateLimit.Channel.Burst <= 0 {
 			return fmt.Errorf("rate_limit.channel.burst must be positive")
 		}
+	}
+
+	if c.Ack.CursorTTL <= 0 {
+		return fmt.Errorf("ack.cursor_ttl must be positive")
 	}
 
 	if c.Retention.DefaultTTL <= 0 {

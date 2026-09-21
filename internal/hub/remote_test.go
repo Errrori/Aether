@@ -45,7 +45,7 @@ func TestHub_HasSubscribers(t *testing.T) {
 	if h.HasSubscribers("chan.a") {
 		t.Fatal("HasSubscribers = true before any subscription")
 	}
-	if err := h.Subscribe(conn, []string{"chan.a"}, nil); err != nil {
+	if err := h.Subscribe(conn, []string{"chan.a"}, SubscribeOptions{}); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 	if !h.HasSubscribers("chan.a") {
@@ -62,7 +62,7 @@ func TestHub_DeliverRemoteDeliversAndDedups(t *testing.T) {
 	conn := newTestConnection(t, "c1")
 	ctx := context.Background()
 
-	if err := h.Subscribe(conn, []string{"chan.a"}, nil); err != nil {
+	if err := h.Subscribe(conn, []string{"chan.a"}, SubscribeOptions{}); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 	drainFrame(t, conn) // subscribed confirmation
@@ -97,7 +97,7 @@ func TestHub_DeliverRemoteEvictedAndReadError(t *testing.T) {
 	conn := newTestConnection(t, "c1")
 	ctx := context.Background()
 
-	if err := h.Subscribe(conn, []string{"chan.a"}, nil); err != nil {
+	if err := h.Subscribe(conn, []string{"chan.a"}, SubscribeOptions{}); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 	drainFrame(t, conn) // subscribed confirmation
@@ -144,7 +144,7 @@ func TestHub_CatchUpDeliversMissedAndSkipsSelfOrigin(t *testing.T) {
 	h.config.HistoryLimit = 2 // force paging across batches
 	conn := newTestConnection(t, "c1")
 
-	if err := h.Subscribe(conn, []string{"chan.a"}, nil); err != nil {
+	if err := h.Subscribe(conn, []string{"chan.a"}, SubscribeOptions{}); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 	drainFrame(t, conn) // subscribed confirmation
@@ -182,7 +182,7 @@ func TestHub_CatchUpSendsGapWhenWindowAdvanced(t *testing.T) {
 	h, st := newClusterTestHub(t, "node-a")
 	conn := newTestConnection(t, "c1")
 
-	if err := h.Subscribe(conn, []string{"chan.a"}, nil); err != nil {
+	if err := h.Subscribe(conn, []string{"chan.a"}, SubscribeOptions{}); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 	drainFrame(t, conn) // subscribed confirmation

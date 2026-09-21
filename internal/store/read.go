@@ -8,7 +8,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const maxHistoryLimit = 1000
+// MaxHistoryLimit caps the number of messages a single ReadHistory call
+// returns. Callers that loop over batches must use this effective limit to
+// detect a full batch.
+const MaxHistoryLimit = 1000
 
 // ReadHistory returns messages with seq_id > afterSeq for the given channel,
 // ordered by seq_id ascending. Limit is capped at 1000.
@@ -18,8 +21,8 @@ func (s *pgStore) ReadHistory(ctx context.Context, channel string, afterSeq int6
 		return nil, err
 	}
 
-	if limit <= 0 || limit > maxHistoryLimit {
-		limit = maxHistoryLimit
+	if limit <= 0 || limit > MaxHistoryLimit {
+		limit = MaxHistoryLimit
 	}
 
 	rows, err := s.pool.Query(ctx,

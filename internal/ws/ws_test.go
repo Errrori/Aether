@@ -45,16 +45,22 @@ type mockHub struct {
 	mu          sync.Mutex
 	subscribers map[string][]string // connID -> subscribed channels
 	removed     chan string         // optional: receives connID on RemoveConnection
+	lastOpts    hub.SubscribeOptions
+	ackCh       chan map[string]int64
 }
 
 func newMockHub() *mockHub {
-	return &mockHub{subscribers: make(map[string][]string)}
+	return &mockHub{
+		subscribers: make(map[string][]string),
+		ackCh:       make(chan map[string]int64, 8),
+	}
 }
 
 func newMockHubWithRemoved() *mockHub {
 	return &mockHub{
 		subscribers: make(map[string][]string),
 		removed:     make(chan string, 1),
+		ackCh:       make(chan map[string]int64, 8),
 	}
 }
 
@@ -62,9 +68,10 @@ func (h *mockHub) Publish(ctx context.Context, channel string, payload json.RawM
 	return 0, time.Time{}, nil
 }
 
-func (h *mockHub) Subscribe(conn *hub.Connection, channels []string, afterSeq map[string]int64) error {
+func (h *mockHub) Subscribe(conn *hub.Connection, channels []string, opts hub.SubscribeOptions) error {
 	h.mu.Lock()
 	h.subscribers[conn.ID] = channels
+	h.lastOpts = opts
 	h.mu.Unlock()
 
 	frame, _ := hub.MarshalFrame(hub.SubscribedFrame{
@@ -76,6 +83,19 @@ func (h *mockHub) Subscribe(conn *hub.Connection, channels []string, afterSeq ma
 	default:
 	}
 	return nil
+}
+
+func (h *mockHub) lastSubscribeOptions() hub.SubscribeOptions {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lastOpts
+}
+
+func (h *mockHub) Ack(conn *hub.Connection, acks map[string]int64) {
+	select {
+	case h.ackCh <- acks:
+	default:
+	}
 }
 
 func (h *mockHub) Unsubscribe(conn *hub.Connection, channels []string) {
@@ -379,6 +399,88 @@ func TestReadLoop_SubscribeWithAfterSeq(t *testing.T) {
 	frame := readFrame(t, conn)
 	if frame["type"] != "subscribed" {
 		t.Fatalf("expected subscribed, got %v", frame["type"])
+	}
+}
+
+func TestReadLoop_SubscribeResume(t *testing.T) {
+	cfg := testConfig()
+	mh := newMockHub()
+	mgr := NewManager(mh, &mockAuth{validToken: "valid-token"}, cfg)
+	ts := httptest.NewServer(mgr)
+	defer ts.Close()
+
+	conn, _, err := websocket.Dial(context.Background(), wsURL(ts.URL, "valid-token"), nil)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.CloseNow()
+
+	writeJSON(t, conn, map[string]any{
+		"type":     "subscribe",
+		"channels": []string{"ch1"},
+		"resume":   true,
+	})
+
+	frame := readFrame(t, conn)
+	if frame["type"] != "subscribed" {
+		t.Fatalf("expected subscribed, got %v", frame["type"])
+	}
+	if opts := mh.lastSubscribeOptions(); !opts.Resume {
+		t.Fatal("expected resume option to reach the hub")
+	}
+}
+
+func TestReadLoop_Ack(t *testing.T) {
+	cfg := testConfig()
+	mh := newMockHub()
+	mgr := NewManager(mh, &mockAuth{validToken: "valid-token"}, cfg)
+	ts := httptest.NewServer(mgr)
+	defer ts.Close()
+
+	conn, _, err := websocket.Dial(context.Background(), wsURL(ts.URL, "valid-token"), nil)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.CloseNow()
+
+	writeJSON(t, conn, map[string]any{
+		"type": "ack",
+		"acks": map[string]int64{"ch1": 7},
+	})
+
+	select {
+	case acks := <-mh.ackCh:
+		if acks["ch1"] != 7 {
+			t.Fatalf("expected ack ch1=7, got %v", acks)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ack frame was not forwarded to the hub within 2s")
+	}
+}
+
+func TestReadLoop_MalformedAckFrame(t *testing.T) {
+	cfg := testConfig()
+	mgr := NewManager(newMockHub(), &mockAuth{validToken: "valid-token"}, cfg)
+	ts := httptest.NewServer(mgr)
+	defer ts.Close()
+
+	conn, _, err := websocket.Dial(context.Background(), wsURL(ts.URL, "valid-token"), nil)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.CloseNow()
+
+	writeJSON(t, conn, map[string]any{
+		"type": "ack",
+		"acks": "not-an-object",
+	})
+
+	frame := readFrame(t, conn)
+	if frame["type"] != "error" {
+		t.Fatalf("expected error frame, got %v", frame["type"])
+	}
+	if code := frame["code"].(float64); code != float64(hub.ErrCodeInvalidJSON) {
+		t.Fatalf("expected code %d, got %v", hub.ErrCodeInvalidJSON, code)
 	}
 }
 

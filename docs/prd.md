@@ -258,17 +258,29 @@ GET /metricsz   -> Prometheus text format
 {
   "type": "subscribe",
   "channels": ["order.1234", "system.alerts"],
-  "after_seq": { "order.1234": 40, "system.alerts": 0 }
+  "after_seq": { "order.1234": 40 },
+  "resume": true
 }
 ```
 
-`after_seq` 可选。值为 0 或省略表示不追赶。
+`after_seq` 与 `resume` 均可选：
+
+- `after_seq`：每频道显式回放起点。值为 0 表示从最早可用消息回放；省略（或无该频道）表示不回放。显式值优先于 `resume`。
+- `resume`（默认 `false`）：对没有显式 `after_seq` 的频道，从服务端记录的确认游标处恢复投递。无游标的频道等同不回放（纯实时）。
 
 **取消订阅**
 
 ```json
 { "type": "unsubscribe", "channels": ["order.1234"] }
 ```
+
+**消息确认**
+
+```json
+{ "type": "ack", "acks": { "order.1234": 42 } }
+```
+
+`acks` 为「频道 → 已处理的最新 seq_id」映射，可批量确认。服务端仅对当前已订阅且有权订阅的频道接受确认，并按订阅者（JWT `sub`）持久化游标用于 `resume`；成功静默，非法项返回 `error` 帧（未订阅/seq 非法为 40007，未授权为 40301）。
 
 > 心跳使用 WebSocket 标准 ping/pong 帧，不设应用层心跳帧。
 
@@ -324,6 +336,7 @@ GET /metricsz   -> Prometheus text format
 | 40002 | 请求 | 缺少必填字段 |
 | 40003 | 请求 | 无效 JSON |
 | 40004 | 请求 | 未知帧类型 |
+| 40007 | 请求 | 无效确认（频道未订阅或 seq 非法） |
 | 40101 | 认证 | 无效或缺失 API Key |
 | 40102 | 认证 | 无效或过期 JWT Token |
 | 40301 | 授权 | 未授权订阅该频道 |
@@ -361,14 +374,23 @@ GET /metricsz   -> Prometheus text format
 | channels | set\<string\> | 当前订阅的频道 |
 | cursors | map\<string, int64\> | 每频道最后投递的序列 ID |
 
+**确认游标**（持久化，用于重连恢复）
+| 字段 | 类型 | 描述 |
+|---|---|---|
+| subscriber_id | string (PK) | 订阅者身份，来自 JWT `sub` |
+| channel | string (PK) | 频道名称 |
+| seq_id | int64 | 订阅者已确认的最新序列 ID |
+| updated_at | timestamp | 最后推进时间（用于过期清理） |
+
 ### 6.2 实体关系
 
 ```
 Channel 1---* Message      (一个频道有多条消息)
 Channel 1---* Subscription (一个频道有多个订阅者，仅运行时)
+Channel 1---* Cursor       (一个频道有多个订阅者的确认游标，持久化)
 ```
 
-订阅是短暂的运行时状态，保存在 Hub 的内存映射中，不持久化。连接断开后订阅自动清除，服务端从频道的订阅者集合中移除该连接，内存立即释放。客户端重连时需要重新发送 subscribe 帧建立订阅，并通过 `after_seq` 补追离线期间的消息。
+订阅是短暂的运行时状态，保存在 Hub 的内存映射中，不持久化。连接断开后订阅自动清除，服务端从频道的订阅者集合中移除该连接，内存立即释放。客户端重连时需要重新发送 subscribe 帧建立订阅，并通过 `resume`（服务端确认游标）或 `after_seq`（客户端自持位置）补追离线期间的消息。确认游标按订阅者身份持久化，仅由 `ack` 推进，重连后可跨连接、跨节点恢复。
 
 **设计决策**：Aether 是推送中间件而非消息队列，订阅表示"实时关注"而非"持久消费"。客户端本就知道自己需要哪些频道（由业务逻辑决定），重连时自行重新订阅即可。若需要"离线期间消息排队等待消费"的能力，应在上游使用消息队列（Kafka/RabbitMQ）而非让 Aether 承担此职责。
 

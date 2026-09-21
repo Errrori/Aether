@@ -81,6 +81,17 @@ var migrations = []migration{
 		Version: 5,
 		SQL:     `ALTER TABLE messages ADD COLUMN IF NOT EXISTS origin_node TEXT;`,
 	},
+	{
+		Version: 6,
+		SQL: `CREATE TABLE IF NOT EXISTS subscriber_cursors (
+	    subscriber_id TEXT NOT NULL,
+	    channel       TEXT NOT NULL,
+	    seq_id        BIGINT NOT NULL DEFAULT 0,
+	    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+	    PRIMARY KEY (subscriber_id, channel)
+	);
+	CREATE INDEX IF NOT EXISTS idx_subscriber_cursors_updated_at ON subscriber_cursors (updated_at);`,
+	},
 }
 
 // RunMigrations creates the database schema if it does not exist.
