@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	"github.com/aether-mq/aether/internal/auth"
 	"github.com/aether-mq/aether/internal/hub"
@@ -15,8 +16,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// RateLimiter is the optional publish rate limiter (v2 layer 4). A nil value
+// disables rate limiting entirely. *ratelimit.Limiter matches this interface.
+type RateLimiter interface {
+	// Allow checks the publisher and channel buckets; scope is the limiting
+	// dimension when ok is false.
+	Allow(keyID, channel string) (scope string, retryAfter time.Duration, ok bool)
+}
+
 type ServerConfig struct {
 	MaxPayloadSize int
+	RateLimiter    RateLimiter
 }
 
 type Server struct {

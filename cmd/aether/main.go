@@ -22,6 +22,7 @@ import (
 	"github.com/aether-mq/aether/internal/hub"
 	"github.com/aether-mq/aether/internal/keymgmt"
 	"github.com/aether-mq/aether/internal/metrics"
+	"github.com/aether-mq/aether/internal/ratelimit"
 	"github.com/aether-mq/aether/internal/store"
 	"github.com/aether-mq/aether/internal/webhook"
 	"github.com/aether-mq/aether/internal/ws"
@@ -156,9 +157,37 @@ func run() error {
 	whm := webhook.New(whStore, h, slog.Default())
 	slog.Info("webhook manager ready")
 
+	// 9b. Rate limiter (v2 layer 4): in-process token buckets for the HTTP
+	// publish entrypoints. Disabled by default — no buckets, no sweeper.
+	var limiter *ratelimit.Limiter
+	limiterCtx, limiterCancel := context.WithCancel(context.Background())
+	defer limiterCancel()
+	if cfg.RateLimit.Enabled {
+		limiter = ratelimit.New(ratelimit.Config{
+			Publisher: ratelimit.RateConfig{
+				Rate:  cfg.RateLimit.Publisher.Rate,
+				Burst: cfg.RateLimit.Publisher.Burst,
+			},
+			Channel: ratelimit.RateConfig{
+				Rate:  cfg.RateLimit.Channel.Rate,
+				Burst: cfg.RateLimit.Channel.Burst,
+			},
+			OnRejected: metrics.NewRateLimitRejected(),
+		}, slog.Default())
+		limiter.Start(limiterCtx)
+		slog.Info("rate limiting enabled",
+			"publisher_rate", cfg.RateLimit.Publisher.Rate,
+			"publisher_burst", cfg.RateLimit.Publisher.Burst,
+			"channel_rate", cfg.RateLimit.Channel.Rate,
+			"channel_burst", cfg.RateLimit.Channel.Burst)
+	}
+
 	// 10. HTTP API server.
 	apiCfg := api.ServerConfig{
 		MaxPayloadSize: cfg.Server.MaxPayloadSize,
+	}
+	if limiter != nil {
+		apiCfg.RateLimiter = limiter
 	}
 	srv := api.New(h, au, st, km, ks, whm, wsm, apiCfg)
 
@@ -217,6 +246,13 @@ func run() error {
 	slog.Info("shutting down", "timeout", cfg.Shutdown.Timeout)
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("graceful shutdown incomplete", "err", err)
+	}
+
+	// Stop the rate limiter sweeper after the HTTP drain; Allow stays usable
+	// during the drain and does not depend on the sweeper.
+	limiterCancel()
+	if limiter != nil {
+		limiter.Wait()
 	}
 	slog.Info("shutdown complete")
 	return nil

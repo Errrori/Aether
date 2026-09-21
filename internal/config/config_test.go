@@ -773,3 +773,147 @@ func TestLoad_ClusterValidate(t *testing.T) {
 		})
 	}
 }
+
+// --- v2 第4层：rate_limit 配置节 ---
+
+func TestLoad_RateLimitDefaults(t *testing.T) {
+	path := writeTestConfig(t, clusterBaseYAML)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RateLimit.Enabled {
+		t.Error("RateLimit.Enabled = true, want false by default")
+	}
+	if cfg.RateLimit.Publisher.Rate != 1000 || cfg.RateLimit.Publisher.Burst != 2000 {
+		t.Errorf("RateLimit.Publisher = %+v, want {1000 2000}", cfg.RateLimit.Publisher)
+	}
+	if cfg.RateLimit.Channel.Rate != 2000 || cfg.RateLimit.Channel.Burst != 4000 {
+		t.Errorf("RateLimit.Channel = %+v, want {2000 4000}", cfg.RateLimit.Channel)
+	}
+}
+
+func TestLoad_RateLimitEnvOverride(t *testing.T) {
+	path := writeTestConfig(t, clusterBaseYAML+`
+rate_limit:
+  enabled: false
+  publisher:
+    rate: 100
+    burst: 200
+  channel:
+    rate: 300
+    burst: 400
+`)
+
+	t.Setenv("AETHER_RATE_LIMIT_ENABLED", "true")
+	t.Setenv("AETHER_RATE_LIMIT_PUBLISHER_RATE", "12.5")
+	t.Setenv("AETHER_RATE_LIMIT_PUBLISHER_BURST", "25")
+	t.Setenv("AETHER_RATE_LIMIT_CHANNEL_RATE", "50")
+	t.Setenv("AETHER_RATE_LIMIT_CHANNEL_BURST", "100")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.RateLimit.Enabled {
+		t.Error("RateLimit.Enabled not overridden to true")
+	}
+	if cfg.RateLimit.Publisher.Rate != 12.5 {
+		t.Errorf("Publisher.Rate = %v, want 12.5", cfg.RateLimit.Publisher.Rate)
+	}
+	if cfg.RateLimit.Publisher.Burst != 25 {
+		t.Errorf("Publisher.Burst = %d, want 25", cfg.RateLimit.Publisher.Burst)
+	}
+	if cfg.RateLimit.Channel.Rate != 50 {
+		t.Errorf("Channel.Rate = %v, want 50", cfg.RateLimit.Channel.Rate)
+	}
+	if cfg.RateLimit.Channel.Burst != 100 {
+		t.Errorf("Channel.Burst = %d, want 100", cfg.RateLimit.Channel.Burst)
+	}
+}
+
+func TestLoad_RateLimitEnvOverrideInvalid(t *testing.T) {
+	path := writeTestConfig(t, clusterBaseYAML)
+	t.Setenv("AETHER_RATE_LIMIT_PUBLISHER_RATE", "notanumber")
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for invalid float env var")
+	}
+	if !strings.Contains(err.Error(), "invalid float for AETHER_RATE_LIMIT_PUBLISHER_RATE") {
+		t.Errorf("error = %q, want float parse mention", err.Error())
+	}
+}
+
+func TestLoad_RateLimitValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "publisher rate non-positive when enabled",
+			yaml: `rate_limit:
+  enabled: true
+  publisher:
+    rate: 0
+    burst: 10`,
+			wantErr: "rate_limit.publisher.rate must be positive",
+		},
+		{
+			name: "publisher burst non-positive when enabled",
+			yaml: `rate_limit:
+  enabled: true
+  publisher:
+    rate: 10
+    burst: 0`,
+			wantErr: "rate_limit.publisher.burst must be positive",
+		},
+		{
+			name: "channel rate non-positive when enabled",
+			yaml: `rate_limit:
+  enabled: true
+  channel:
+    rate: -1
+    burst: 10`,
+			wantErr: "rate_limit.channel.rate must be positive",
+		},
+		{
+			name: "channel burst non-positive when enabled",
+			yaml: `rate_limit:
+  enabled: true
+  channel:
+    rate: 10
+    burst: 0`,
+			wantErr: "rate_limit.channel.burst must be positive",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTestConfig(t, clusterBaseYAML+tt.yaml)
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want to contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoad_RateLimitDisabledSkipsValidation(t *testing.T) {
+	path := writeTestConfig(t, clusterBaseYAML+`
+rate_limit:
+  enabled: false
+  publisher:
+    rate: 0
+    burst: 0
+`)
+
+	if _, err := Load(path); err != nil {
+		t.Fatalf("disabled rate limit should skip validation: %v", err)
+	}
+}

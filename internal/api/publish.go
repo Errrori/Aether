@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/aether-mq/aether/internal/store"
 )
@@ -58,6 +61,11 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if scope, retryAfter, ok := s.rateLimitAllowed(r.Context(), req.Channel); !ok {
+		writeRateLimitError(w, scope, retryAfter)
+		return
+	}
+
 	payloadBytes, err := json.Marshal(req.Payload)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidJSON, "failed to marshal payload")
@@ -80,6 +88,33 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		SeqID:     seqID,
 		Timestamp: timestamp.Format("2006-01-02T15:04:05Z07:00"),
 	})
+}
+
+// --- Rate limiting ---
+
+// rateLimitAllowed checks the optional publish rate limiter using the key
+// identity injected by authMiddleware. Limiting is skipped when disabled or
+// when no key identity is present.
+func (s *Server) rateLimitAllowed(ctx context.Context, channel string) (scope string, retryAfter time.Duration, ok bool) {
+	if s.cfg.RateLimiter == nil {
+		return "", 0, true
+	}
+	result, found := keyResultFromContext(ctx)
+	if !found || result.KeyID == "" {
+		return "", 0, true
+	}
+	return s.cfg.RateLimiter.Allow(result.KeyID, channel)
+}
+
+// writeRateLimitError responds with 429, a Retry-After header in whole seconds
+// (at least 1) and error code 42901.
+func writeRateLimitError(w http.ResponseWriter, scope string, retryAfter time.Duration) {
+	seconds := int(math.Ceil(retryAfter.Seconds()))
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, scope+" rate limit exceeded")
 }
 
 // --- Batch Publish ---
@@ -179,6 +214,15 @@ func (s *Server) processBatchMessage(ctx context.Context, msg *batchPublishMessa
 		result.Error = &batchMessageError{
 			Code:    ErrCodeInvalidChannel,
 			Message: err.Error(),
+		}
+		return
+	}
+
+	if scope, _, ok := s.rateLimitAllowed(ctx, msg.Channel); !ok {
+		result.Status = "error"
+		result.Error = &batchMessageError{
+			Code:    ErrCodeRateLimited,
+			Message: scope + " rate limit exceeded",
 		}
 		return
 	}

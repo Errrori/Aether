@@ -57,6 +57,16 @@ cluster:
   reconnect_base: 1s               # LISTEN 重连退避起点
   reconnect_max: 30s               # LISTEN 重连退避上限
 
+# ---- 速率限制（HTTP 发布入口，每节点独立生效）----
+rate_limit:
+  enabled: false                   # 默认关闭；开启后超出配额返回 429（错误码 42901）
+  publisher:                       # 按 API Key 汇总的配额
+    rate: 1000                     # 每秒补充令牌数
+    burst: 2000                    # 桶容量（允许的突发量）
+  channel:                         # 按频道汇总的配额（跨 Key 共享）
+    rate: 2000
+    burst: 4000
+
 # ---- 优雅关闭 ----
 shutdown:
   timeout: 10s                     # 关闭超时，超时后强制断开剩余连接

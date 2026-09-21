@@ -72,3 +72,18 @@ func New() hub.Metrics {
 		},
 	}
 }
+
+// NewRateLimitRejected registers the rate-limit rejection counter and returns
+// a callback suitable for ratelimit.Config.OnRejected.
+func NewRateLimitRejected() func(scope string) {
+	rateLimited := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "aether_rate_limited_total",
+		Help: "Total number of publish requests rejected by rate limiting.",
+	}, []string{"scope"})
+
+	prometheus.MustRegister(rateLimited)
+
+	return func(scope string) {
+		rateLimited.WithLabelValues(scope).Inc()
+	}
+}

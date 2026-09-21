@@ -1,9 +1,21 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strings"
+
+	"github.com/aether-mq/aether/internal/auth"
 )
+
+// keyResultCtxKey carries the validated API key identity from the auth
+// middleware to handlers (used by the optional rate limiter).
+type keyResultCtxKey struct{}
+
+func keyResultFromContext(ctx context.Context) (auth.KeyValidationResult, bool) {
+	result, ok := ctx.Value(keyResultCtxKey{}).(auth.KeyValidationResult)
+	return result, ok
+}
 
 func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -21,7 +33,8 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, ErrCodeInvalidAPIKey, "invalid or missing api key")
 			return
 		}
-		next(w, r)
+		ctx := context.WithValue(r.Context(), keyResultCtxKey{}, result)
+		next(w, r.WithContext(ctx))
 	}
 }
 

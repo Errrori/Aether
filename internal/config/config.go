@@ -25,6 +25,7 @@ type Config struct {
 	Auth      AuthConfig      `yaml:"auth"`
 	WebSocket WebSocketConfig `yaml:"websocket"`
 	Cluster   ClusterConfig   `yaml:"cluster"`
+	RateLimit RateLimitConfig `yaml:"rate_limit"`
 	Retention RetentionConfig `yaml:"retention"`
 	Shutdown  ShutdownConfig  `yaml:"shutdown"`
 	Log       LogConfig       `yaml:"log"`
@@ -73,6 +74,22 @@ type ClusterConfig struct {
 	ReconnectMax  time.Duration `yaml:"reconnect_max"`
 }
 
+// RateLimitConfig controls publish rate limiting per publisher (API key) and
+// per channel. Disabled by default; when enabled all rate/burst values must be
+// positive.
+type RateLimitConfig struct {
+	Enabled   bool          `yaml:"enabled"`
+	Publisher RateLimitRule `yaml:"publisher"`
+	Channel   RateLimitRule `yaml:"channel"`
+}
+
+// RateLimitRule is a token bucket: Burst is the bucket capacity and Rate is the
+// per-second refill rate.
+type RateLimitRule struct {
+	Rate  float64 `yaml:"rate"`
+	Burst int     `yaml:"burst"`
+}
+
 type RetentionRule struct {
 	Pattern  string        `yaml:"pattern"`
 	TTL      time.Duration `yaml:"ttl"`
@@ -119,6 +136,10 @@ func defaultConfig() *Config {
 		Cluster: ClusterConfig{
 			ReconnectBase: 1 * time.Second,
 			ReconnectMax:  30 * time.Second,
+		},
+		RateLimit: RateLimitConfig{
+			Publisher: RateLimitRule{Rate: 1000, Burst: 2000},
+			Channel:   RateLimitRule{Rate: 2000, Burst: 4000},
 		},
 		Retention: RetentionConfig{
 			DefaultTTL:      720 * time.Hour,
@@ -192,6 +213,12 @@ func applyEnvOverrides(cfg *Config) error {
 		{"AETHER_CLUSTER_NODE_ID", &cfg.Cluster.NodeID, "string"},
 		{"AETHER_CLUSTER_RECONNECT_BASE", &cfg.Cluster.ReconnectBase, "duration"},
 		{"AETHER_CLUSTER_RECONNECT_MAX", &cfg.Cluster.ReconnectMax, "duration"},
+		// rate_limit
+		{"AETHER_RATE_LIMIT_ENABLED", &cfg.RateLimit.Enabled, "bool"},
+		{"AETHER_RATE_LIMIT_PUBLISHER_RATE", &cfg.RateLimit.Publisher.Rate, "float"},
+		{"AETHER_RATE_LIMIT_PUBLISHER_BURST", &cfg.RateLimit.Publisher.Burst, "int"},
+		{"AETHER_RATE_LIMIT_CHANNEL_RATE", &cfg.RateLimit.Channel.Rate, "float"},
+		{"AETHER_RATE_LIMIT_CHANNEL_BURST", &cfg.RateLimit.Channel.Burst, "int"},
 		// retention
 		{"AETHER_RETENTION_DEFAULT_TTL", &cfg.Retention.DefaultTTL, "duration"},
 		{"AETHER_RETENTION_DEFAULT_MAX_COUNT", &cfg.Retention.DefaultMaxCount, "int"},
@@ -217,6 +244,12 @@ func applyEnvOverrides(cfg *Config) error {
 				return fmt.Errorf("invalid int for %s: %w", o.env, err)
 			}
 			*(o.target.(*int)) = v
+		case "float":
+			v, err := strconv.ParseFloat(val, 64)
+			if err != nil {
+				return fmt.Errorf("invalid float for %s: %w", o.env, err)
+			}
+			*(o.target.(*float64)) = v
 		case "bool":
 			v, err := strconv.ParseBool(val)
 			if err != nil {
@@ -295,6 +328,21 @@ func (c *Config) Validate() error {
 	}
 	if c.Cluster.NodeID != "" && !clusterNodeIDRegex.MatchString(c.Cluster.NodeID) {
 		return fmt.Errorf("cluster.node_id must match [A-Za-z0-9_-]{1,64}")
+	}
+
+	if c.RateLimit.Enabled {
+		if c.RateLimit.Publisher.Rate <= 0 {
+			return fmt.Errorf("rate_limit.publisher.rate must be positive")
+		}
+		if c.RateLimit.Publisher.Burst <= 0 {
+			return fmt.Errorf("rate_limit.publisher.burst must be positive")
+		}
+		if c.RateLimit.Channel.Rate <= 0 {
+			return fmt.Errorf("rate_limit.channel.rate must be positive")
+		}
+		if c.RateLimit.Channel.Burst <= 0 {
+			return fmt.Errorf("rate_limit.channel.burst must be positive")
+		}
 	}
 
 	if c.Retention.DefaultTTL <= 0 {

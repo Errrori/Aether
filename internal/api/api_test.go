@@ -1462,3 +1462,166 @@ func TestWebhookReceive_Success(t *testing.T) {
 		t.Fatalf("expected ok=true, got %v", json["ok"])
 	}
 }
+
+// --- tests: rate limiting (v2 第4层) ---
+
+type mockRateLimiter struct {
+	denyChannel string // empty = allow everything
+	scope       string
+	retryAfter  time.Duration
+	keyIDs      []string
+	channels    []string
+}
+
+func (m *mockRateLimiter) Allow(keyID, channel string) (string, time.Duration, bool) {
+	m.keyIDs = append(m.keyIDs, keyID)
+	m.channels = append(m.channels, channel)
+	if m.denyChannel != "" && channel == m.denyChannel {
+		return m.scope, m.retryAfter, false
+	}
+	return "", 0, true
+}
+
+func TestPublish_RateLimited(t *testing.T) {
+	tests := []struct {
+		name       string
+		scope      string
+		retryAfter time.Duration
+		wantHeader string
+	}{
+		{name: "publisher scope", scope: "publisher", retryAfter: 1500 * time.Millisecond, wantHeader: "2"},
+		{name: "channel scope", scope: "channel", retryAfter: 100 * time.Millisecond, wantHeader: "1"},
+		{name: "minimum one second", scope: "publisher", retryAfter: 0, wantHeader: "1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server, _, _, _ := newTestServer(t)
+			rl := &mockRateLimiter{denyChannel: "test.channel", scope: tt.scope, retryAfter: tt.retryAfter}
+			server.cfg.RateLimiter = rl
+
+			body := strings.NewReader(`{"channel":"test.channel","payload":"data"}`)
+			resp := doRequest(t, server, "POST", "/api/v1/publish", body, map[string]string{
+				"Authorization": "Bearer valid-key",
+			})
+
+			if resp.StatusCode != http.StatusTooManyRequests {
+				t.Fatalf("expected 429, got %d", resp.StatusCode)
+			}
+			if got := resp.Header.Get("Retry-After"); got != tt.wantHeader {
+				t.Errorf("Retry-After = %q, want %q", got, tt.wantHeader)
+			}
+			json := readJSON(t, resp)
+			errObj := json["error"].(map[string]any)
+			if errObj["code"] != float64(ErrCodeRateLimited) {
+				t.Errorf("error code = %v, want %d", errObj["code"], ErrCodeRateLimited)
+			}
+			msg, _ := errObj["message"].(string)
+			if !strings.Contains(msg, tt.scope) {
+				t.Errorf("message = %q, want mention of %q", msg, tt.scope)
+			}
+			if len(rl.keyIDs) != 1 || rl.keyIDs[0] != "mock-id" {
+				t.Errorf("limiter keyIDs = %v, want [mock-id]", rl.keyIDs)
+			}
+			if len(rl.channels) != 1 || rl.channels[0] != "test.channel" {
+				t.Errorf("limiter channels = %v, want [test.channel]", rl.channels)
+			}
+		})
+	}
+}
+
+func TestPublish_RateLimitAllowsUnderQuota(t *testing.T) {
+	server, _, _, _ := newTestServer(t)
+	rl := &mockRateLimiter{scope: "publisher", retryAfter: time.Second}
+	server.cfg.RateLimiter = rl
+
+	body := strings.NewReader(`{"channel":"test.channel","payload":"data"}`)
+	resp := doRequest(t, server, "POST", "/api/v1/publish", body, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if len(rl.channels) != 1 || rl.channels[0] != "test.channel" {
+		t.Errorf("limiter channels = %v, want [test.channel]", rl.channels)
+	}
+}
+
+func TestPublish_RateLimitSkipsInvalidRequests(t *testing.T) {
+	server, _, _, _ := newTestServer(t)
+	rl := &mockRateLimiter{denyChannel: "test.channel", scope: "publisher", retryAfter: time.Second}
+	server.cfg.RateLimiter = rl
+
+	// Invalid channel: rejected before the limiter runs.
+	resp := doRequest(t, server, "POST", "/api/v1/publish",
+		strings.NewReader(`{"channel":"bad*channel","payload":"data"}`),
+		map[string]string{"Authorization": "Bearer valid-key"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid channel: expected 400, got %d", resp.StatusCode)
+	}
+	if len(rl.channels) != 0 {
+		t.Errorf("limiter called for invalid channel: %v", rl.channels)
+	}
+
+	// Invalid key: rejected before the limiter runs.
+	resp = doRequest(t, server, "POST", "/api/v1/publish",
+		strings.NewReader(`{"channel":"test.channel","payload":"data"}`),
+		map[string]string{"Authorization": "Bearer invalid-key"})
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("invalid key: expected 401, got %d", resp.StatusCode)
+	}
+	if len(rl.channels) != 0 {
+		t.Errorf("limiter called for invalid key: %v", rl.channels)
+	}
+}
+
+func TestBatchPublish_RateLimited(t *testing.T) {
+	server, _, _, _ := newTestServer(t)
+	rl := &mockRateLimiter{denyChannel: "test.ch2", scope: "channel", retryAfter: time.Second}
+	server.cfg.RateLimiter = rl
+
+	body := strings.NewReader(`{"messages":[
+		{"channel":"test.ch1","payload":"ok"},
+		{"channel":"test.ch2","payload":"denied"},
+		{"channel":"test.ch3","payload":"ok"}
+	]}`)
+	resp := doRequest(t, server, "POST", "/api/v2/publish/batch", body, map[string]string{
+		"Authorization": "Bearer valid-key",
+	})
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	json := readJSON(t, resp)
+	results := json["results"].([]any)
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+
+	if first := results[0].(map[string]any); first["status"] != "success" {
+		t.Errorf("first message status = %v, want success", first["status"])
+	}
+
+	second := results[1].(map[string]any)
+	if second["status"] != "error" {
+		t.Fatalf("second message status = %v, want error", second["status"])
+	}
+	errObj := second["error"].(map[string]any)
+	if errObj["code"] != float64(ErrCodeRateLimited) {
+		t.Errorf("second message error code = %v, want %d", errObj["code"], ErrCodeRateLimited)
+	}
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(msg, "channel") {
+		t.Errorf("second message error = %q, want mention of channel", msg)
+	}
+
+	if third := results[2].(map[string]any); third["status"] != "success" {
+		t.Errorf("third message status = %v, want success", third["status"])
+	}
+
+	if len(rl.channels) != 3 {
+		t.Errorf("limiter calls = %v, want one per message", rl.channels)
+	}
+}
