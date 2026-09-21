@@ -327,8 +327,8 @@ WHERE updated_at < now() - make_interval(secs => <eviction_interval_seconds>)
 第2层  消息入口    Webhook (FR-2.5) + Batch Publish API (FR-2.4 拆分)          ✅ 已完成
 第3层  扩展       集群模式 (FR-2.2)                                                ✅ 已完成
 第4层  保护       速率限制 (FR-2.8)                                                ✅ 已完成
-第5a层 消费体验    消息确认 (FR-2.6)                                               ← 当前
-第5b层 消费体验    SSE (FR-2.9)                                                    （随后）
+第5a层 消费体验    消息确认 (FR-2.6)                                               ✅ 已完成
+第5b层 消费体验    SSE (FR-2.9)                                                    ← 当前
 第6层  扩展       Presence (FR-2.3)                                                （推迟）
 ```
 
@@ -1115,6 +1115,8 @@ WebSocket error 帧新增 `40007`：ack 的频道未订阅或 seq 非法（HTTP 
 | AK-13 | 既有测试全量通过（含 `SubscribeOptions` 签名与 mock 回归） |
 
 验证：`go vet ./...`、`go test -count=1 ./...` 全部通过；`go vet -tags integration ./...`、`go test -tags integration -p 1 -count=1 ./...`（真实 PostgreSQL 16，Docker 5433）全部通过。`-race` 由 CI 执行（本地 Windows 环境的 race 运行时不可用，测试二进制启动即失败 `0xc0000139`，与本次改动无关）。
+
+CI 验证：run #65（commit 75a7ddb）通过，包含 `go test -race` 与真实 PostgreSQL 集成测试（`-p 1`）。
 
 配套文档回写：PRD 5.2 增 `ack` 帧与 `subscribe.resume` 字段（并修正 `after_seq=0` 的既有描述为「从最早可用消息回放」）、5.3 增 40007、6.1 增确认游标实体与关系；`config.example.yaml` 增 `ack.cursor_ttl`。
 
