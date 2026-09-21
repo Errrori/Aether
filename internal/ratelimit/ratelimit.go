@@ -107,8 +107,10 @@ func (l *Limiter) Wait() {
 // its token restored, so a request denied by one dimension does not consume
 // quota from the other.
 func (l *Limiter) Allow(keyID, channel string) (scope string, retryAfter time.Duration, ok bool) {
-	now := time.Now()
+	return l.allowAt(keyID, channel, time.Now())
+}
 
+func (l *Limiter) allowAt(keyID, channel string, now time.Time) (scope string, retryAfter time.Duration, ok bool) {
 	pubLim, pubRes := l.publisher.reserve(keyID, now)
 	if delay := pubRes.DelayFrom(now); !pubRes.OK() || delay > 0 {
 		pubRes.Cancel()
