@@ -50,9 +50,11 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          # Prereleases only get the exact version tag; the major.minor tag
+          # moves on stable releases alone.
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref_name, '-') }}
           # `latest` flavor defaults to `auto`: prerelease tags (vX.Y.Z-rc.N)
           # do not move `latest`.
       - uses: docker/build-push-action@v6
