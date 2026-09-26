@@ -12,10 +12,7 @@ import (
 // The signature parameter may include an optional "sha256=" prefix
 // (compatible with GitHub and other webhook providers).
 func VerifySignature(secret []byte, body []byte, signature string) bool {
-	sig := signature
-	if strings.HasPrefix(sig, "sha256=") {
-		sig = sig[len("sha256="):]
-	}
+	sig := strings.TrimPrefix(signature, "sha256=")
 
 	expected, err := hex.DecodeString(sig)
 	if err != nil {

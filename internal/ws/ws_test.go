@@ -24,8 +24,8 @@ type mockAuth struct {
 func (a *mockAuth) ValidateAPIKey(ctx context.Context, key string) (auth.KeyValidationResult, error) {
 	return auth.KeyValidationResult{}, nil
 }
-func (a *mockAuth) InvalidateCache(keyHash string)              {}
-func (a *mockAuth) CacheStats() (int64, int64)                  { return 0, 0 }
+func (a *mockAuth) InvalidateCache(keyHash string) {}
+func (a *mockAuth) CacheStats() (int64, int64)     { return 0, 0 }
 
 func (a *mockAuth) ParseAndValidateToken(tokenString string) (*auth.Claims, error) {
 	if tokenString == a.validToken {
@@ -175,7 +175,7 @@ func TestServeHTTP_ValidToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }() // test cleanup: close error is not actionable
 
 	if resp.StatusCode != 101 {
 		t.Fatalf("expected status 101, got %d", resp.StatusCode)
@@ -263,7 +263,7 @@ func TestServeHTTP_OriginAllowed_ExactMatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }() // test cleanup: close error is not actionable
 	if resp.StatusCode != 101 {
 		t.Fatalf("expected status 101, got %d", resp.StatusCode)
 	}
@@ -284,7 +284,7 @@ func TestServeHTTP_OriginWildcard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }() // test cleanup: close error is not actionable
 	if resp.StatusCode != 101 {
 		t.Fatalf("expected status 101, got %d", resp.StatusCode)
 	}
@@ -302,7 +302,7 @@ func TestServeHTTP_NoOrigin_NonBrowser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }() // test cleanup: close error is not actionable
 	if resp.StatusCode != 101 {
 		t.Fatalf("expected status 101, got %d", resp.StatusCode)
 	}
@@ -358,7 +358,7 @@ func TestReadLoop_Subscribe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }() // test cleanup: close error is not actionable
 
 	writeJSON(t, conn, map[string]any{
 		"type":     "subscribe",
@@ -388,7 +388,7 @@ func TestReadLoop_SubscribeWithAfterSeq(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }() // test cleanup: close error is not actionable
 
 	writeJSON(t, conn, map[string]any{
 		"type":      "subscribe",
@@ -413,7 +413,7 @@ func TestReadLoop_SubscribeResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }() // test cleanup: close error is not actionable
 
 	writeJSON(t, conn, map[string]any{
 		"type":     "subscribe",
@@ -441,7 +441,7 @@ func TestReadLoop_Ack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }() // test cleanup: close error is not actionable
 
 	writeJSON(t, conn, map[string]any{
 		"type": "ack",
@@ -468,7 +468,7 @@ func TestReadLoop_MalformedAckFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }() // test cleanup: close error is not actionable
 
 	writeJSON(t, conn, map[string]any{
 		"type": "ack",
@@ -494,7 +494,7 @@ func TestReadLoop_Unsubscribe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }() // test cleanup: close error is not actionable
 
 	// Subscribe first
 	writeJSON(t, conn, map[string]any{
@@ -525,7 +525,7 @@ func TestReadLoop_UnknownFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }() // test cleanup: close error is not actionable
 
 	writeJSON(t, conn, map[string]any{
 		"type": "unknown_type",
@@ -551,7 +551,7 @@ func TestReadLoop_InvalidJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }() // test cleanup: close error is not actionable
 
 	// Send non-JSON data
 	if err := conn.Write(context.Background(), websocket.MessageText, []byte("not json")); err != nil {
@@ -578,7 +578,7 @@ func TestReadLoop_MalformedSubscribeFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }() // test cleanup: close error is not actionable
 
 	// Send subscribe with channels as string instead of array
 	writeJSON(t, conn, map[string]any{
@@ -643,7 +643,7 @@ func TestConnection_OversizedFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }() // test cleanup: close error is not actionable
 
 	// Send a frame larger than the limit
 	bigPayload := strings.Repeat("x", 200)
@@ -670,7 +670,7 @@ func TestReadLoop_SubscribeEmptyChannels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }() // test cleanup: close error is not actionable
 
 	writeJSON(t, conn, map[string]any{
 		"type":     "subscribe",
@@ -696,7 +696,7 @@ func TestShutdown_CloseCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }() // test cleanup: close error is not actionable
 
 	var shutdownErr error
 	done := make(chan struct{})

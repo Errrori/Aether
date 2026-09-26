@@ -21,7 +21,10 @@ func (s *pgStore) WriteMessage(ctx context.Context, channel string, payload json
 	if err != nil {
 		return 0, time.Time{}, fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() {
+		// Rollback after a successful Commit is a no-op; the error is not actionable.
+		_ = tx.Rollback(ctx)
+	}()
 
 	// Step 1: Ensure channel exists, lock its row and read current_seq in one
 	// statement. A separate INSERT followed by SELECT ... FOR UPDATE leaves a

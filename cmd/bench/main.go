@@ -122,7 +122,8 @@ func runScenarioA(cfg benchConfig) ScenarioResult {
 					}
 					if err := sub.Subscribe(subCtx, []string{fmt.Sprintf("bench.a.%d.%d", batch, idx)}, nil); err != nil {
 						totalFailures.Add(1)
-						sub.Close()
+						// Cleanup after a failed subscribe is best-effort.
+						_ = sub.Close()
 						return
 					}
 
@@ -132,7 +133,7 @@ func runScenarioA(cfg benchConfig) ScenarioResult {
 					activeSubs.Add(1)
 					go func() {
 						defer activeSubs.Done()
-						defer sub.Close()
+						defer func() { _ = sub.Close() }() // read-loop exit: close error is not actionable
 						sub.ReadLoop(ctx)
 					}()
 				}(i)
@@ -244,7 +245,8 @@ func runScenarioBSingle(cfg benchConfig, v scenarioBVariants) ScenarioResult {
 		if err := sub.Subscribe(subCtx, []string{v.channel}, nil); err != nil {
 			fmt.Printf("    subscriber %d subscribe: %v\n", i, err)
 			subCancel()
-			sub.Close()
+			// Subscriber cleanup after a failed subscribe is best-effort.
+			_ = sub.Close()
 			continue
 		}
 		subCancel()
@@ -253,7 +255,7 @@ func runScenarioBSingle(cfg benchConfig, v scenarioBVariants) ScenarioResult {
 		subWg.Add(1)
 		go func(s *Subscriber) {
 			defer subWg.Done()
-			defer s.Close()
+			defer func() { _ = s.Close() }() // read-loop exit: close error is not actionable
 			_ = s.ReadLoop(ctx)
 			_, latencies := s.Stats()
 			e2eMu.Lock()
@@ -280,7 +282,9 @@ func runScenarioBSingle(cfg benchConfig, v scenarioBVariants) ScenarioResult {
 			default:
 			}
 			payload := benchPayload()
-			pub.Publish(ctx, v.channel, payload)
+			// Publish records success/failure in Publisher stats; the per-call
+			// error is already accounted for there.
+			_, _ = pub.Publish(ctx, v.channel, payload)
 		}
 	}()
 
@@ -325,7 +329,8 @@ func runScenarioBMultiChannel(cfg benchConfig, numChannels int) ScenarioResult {
 		}
 		if err := sub.Subscribe(subCtx, []string{ch}, nil); err != nil {
 			subCancel()
-			sub.Close()
+			// Subscriber cleanup after a failed subscribe is best-effort.
+			_ = sub.Close()
 			continue
 		}
 		subCancel()
@@ -334,7 +339,7 @@ func runScenarioBMultiChannel(cfg benchConfig, numChannels int) ScenarioResult {
 		subWg.Add(1)
 		go func(s *Subscriber) {
 			defer subWg.Done()
-			defer s.Close()
+			defer func() { _ = s.Close() }() // read-loop exit: close error is not actionable
 			_ = s.ReadLoop(ctx)
 			_, latencies := s.Stats()
 			e2eMu.Lock()
@@ -362,7 +367,9 @@ func runScenarioBMultiChannel(cfg benchConfig, numChannels int) ScenarioResult {
 			default:
 			}
 			ch := fmt.Sprintf("bench.b.c.%d", chIdx.Add(1)%int64(numChannels))
-			pub.Publish(ctx, ch, benchPayload())
+			// Publish records success/failure in Publisher stats; the per-call
+			// error is already accounted for there.
+			_, _ = pub.Publish(ctx, ch, benchPayload())
 		}
 	}()
 
@@ -411,7 +418,8 @@ func runScenarioC(cfg benchConfig) ScenarioResult {
 		}
 		if err := sub.Subscribe(subCtx, []string{"bench.c"}, nil); err != nil {
 			subCancel()
-			sub.Close()
+			// Subscriber cleanup after a failed subscribe is best-effort.
+			_ = sub.Close()
 			continue
 		}
 		subCancel()
@@ -420,7 +428,7 @@ func runScenarioC(cfg benchConfig) ScenarioResult {
 		subWg.Add(1)
 		go func(s *Subscriber) {
 			defer subWg.Done()
-			defer s.Close()
+			defer func() { _ = s.Close() }() // read-loop exit: close error is not actionable
 			_ = s.ReadLoop(ctx)
 		}(sub)
 	}
@@ -444,7 +452,9 @@ func runScenarioC(cfg benchConfig) ScenarioResult {
 			case <-pubCtx.Done():
 				return
 			case <-ticker.C:
-				pub.Publish(ctx, "bench.c", benchPayload())
+				// Publish records success/failure in Publisher stats; the per-call
+				// error is already accounted for there.
+				_, _ = pub.Publish(ctx, "bench.c", benchPayload())
 			}
 		}
 	}()
@@ -553,13 +563,14 @@ func runScenarioD(cfg benchConfig) []ScenarioResult {
 		if err := sub.Subscribe(ctx, []string{channel}, map[string]int64{channel: 0}); err != nil {
 			fmt.Printf("    subscribe: %v\n", err)
 			cancel()
-			sub.Close()
+			// Subscriber cleanup after a failed subscribe is best-effort.
+			_ = sub.Close()
 			continue
 		}
 
 		var lastSeq int64
 		go func() {
-			defer sub.Close()
+			defer func() { _ = sub.Close() }() // read-loop exit: close error is not actionable
 			defer cancel()
 			for {
 				msgType, data, err := sub.ReadMessage(ctx)
@@ -586,7 +597,8 @@ func runScenarioD(cfg benchConfig) []ScenarioResult {
 		}()
 
 		<-ctx.Done()
-		sub.Close()
+		// Replay done; close error is not actionable.
+		_ = sub.Close()
 		elapsed := time.Since(start)
 
 		if elapsed.Seconds() == 0 {
@@ -626,7 +638,9 @@ func readServerMemory(server string) float64 {
 	for _, line := range strings.Split(resp, "\n") {
 		if strings.HasPrefix(line, "go_memstats_alloc_bytes ") {
 			var val float64
-			fmt.Sscanf(line, "go_memstats_alloc_bytes %f", &val)
+			if _, err := fmt.Sscanf(line, "go_memstats_alloc_bytes %f", &val); err != nil {
+				return 0
+			}
 			return val / (1024 * 1024)
 		}
 	}
@@ -641,7 +655,9 @@ func readGoroutines(server string) float64 {
 	for _, line := range strings.Split(resp, "\n") {
 		if strings.HasPrefix(line, "go_goroutines ") {
 			var val float64
-			fmt.Sscanf(line, "go_goroutines %f", &val)
+			if _, err := fmt.Sscanf(line, "go_goroutines %f", &val); err != nil {
+				return 0
+			}
 			return val
 		}
 	}
@@ -668,7 +684,10 @@ func httpGet(url string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		// Body is read below; close error is not actionable.
+		_ = resp.Body.Close()
+	}()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return "", fmt.Errorf("read body: %w", err)

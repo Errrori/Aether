@@ -17,10 +17,10 @@ type Subscriber struct {
 	serverURL string
 	jwtSecret string
 
-	mu              sync.Mutex
-	conn            *websocket.Conn
+	mu               sync.Mutex
+	conn             *websocket.Conn
 	messagesReceived int64
-	e2eLatencies    []time.Duration
+	e2eLatencies     []time.Duration
 }
 
 // NewSubscriber creates a subscriber for the given server and JWT secret.

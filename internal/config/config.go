@@ -105,10 +105,10 @@ type RetentionRule struct {
 }
 
 type RetentionConfig struct {
-	DefaultTTL      time.Duration  `yaml:"default_ttl"`
-	DefaultMaxCount int            `yaml:"default_max_count"`
-	EvictionInterval time.Duration `yaml:"eviction_interval"`
-	Rules           []RetentionRule `yaml:"rules"`
+	DefaultTTL       time.Duration   `yaml:"default_ttl"`
+	DefaultMaxCount  int             `yaml:"default_max_count"`
+	EvictionInterval time.Duration   `yaml:"eviction_interval"`
+	Rules            []RetentionRule `yaml:"rules"`
 }
 
 type ShutdownConfig struct {
@@ -153,8 +153,8 @@ func defaultConfig() *Config {
 			CursorTTL: 168 * time.Hour,
 		},
 		Retention: RetentionConfig{
-			DefaultTTL:      720 * time.Hour,
-			DefaultMaxCount: 10000,
+			DefaultTTL:       720 * time.Hour,
+			DefaultMaxCount:  10000,
 			EvictionInterval: 5 * time.Minute,
 		},
 		Shutdown: ShutdownConfig{

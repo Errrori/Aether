@@ -17,8 +17,8 @@ type createWebhookRequest struct {
 }
 
 type webhookListResponse struct {
-	OK       bool                   `json:"ok"`
-	Webhooks []webhook.WebhookMeta  `json:"webhooks"`
+	OK       bool                  `json:"ok"`
+	Webhooks []webhook.WebhookMeta `json:"webhooks"`
 }
 
 type webhookGetResponse struct {

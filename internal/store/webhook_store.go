@@ -21,7 +21,7 @@ type Webhook struct {
 	Name            string
 	URLToken        string
 	ChannelTemplate string
-	Secret      string
+	Secret          string
 	KeyID           string
 	Active          bool
 	CreatedAt       time.Time

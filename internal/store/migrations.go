@@ -122,7 +122,10 @@ func (s *pgStore) RunMigrations(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("begin migration v%d: %w", m.Version, err)
 		}
-		defer tx.Rollback(ctx)
+		defer func() {
+			// Rollback after a successful Commit is a no-op; the error is not actionable.
+			_ = tx.Rollback(ctx)
+		}()
 
 		if _, err := tx.Exec(ctx, m.SQL); err != nil {
 			return fmt.Errorf("apply migration v%d: %w", m.Version, err)

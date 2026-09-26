@@ -100,7 +100,8 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	connID := generateConnID()
 	hubCnn := hub.NewConnection(connID, claims.Subject, claims, m.cfg.OutboundBuffer)
 	hubCnn.Overflow = func() {
-		wsConn.Close(websocket.StatusServiceRestart, "buffer full")
+		// Overflow tears the connection down; the close error is not actionable.
+		_ = wsConn.Close(websocket.StatusServiceRestart, "buffer full")
 	}
 
 	ac := &activeConn{

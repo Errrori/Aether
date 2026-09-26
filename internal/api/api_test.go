@@ -41,8 +41,8 @@ func (h *mockHub) Subscribe(conn *hub.Connection, channels []string, opts hub.Su
 	return nil
 }
 func (h *mockHub) Unsubscribe(conn *hub.Connection, channels []string) {}
-func (h *mockHub) RemoveConnection(conn *hub.Connection)                {}
-func (h *mockHub) Ack(conn *hub.Connection, acks map[string]int64)      {}
+func (h *mockHub) RemoveConnection(conn *hub.Connection)               {}
+func (h *mockHub) Ack(conn *hub.Connection, acks map[string]int64)     {}
 
 // --- mockAuth ---
 
@@ -61,8 +61,8 @@ func (a *mockAuth) ValidateAPIKey(ctx context.Context, key string) (auth.KeyVali
 	}
 	return auth.KeyValidationResult{Valid: true, KeyID: "mock-id", Permissions: store.KeyPermissions{Admin: admin}}, nil
 }
-func (a *mockAuth) InvalidateCache(keyHash string)              {}
-func (a *mockAuth) CacheStats() (int64, int64)                  { return 0, 0 }
+func (a *mockAuth) InvalidateCache(keyHash string) {}
+func (a *mockAuth) CacheStats() (int64, int64)     { return 0, 0 }
 
 func (a *mockAuth) ParseAndValidateToken(tokenString string) (*auth.Claims, error) {
 	return nil, nil
@@ -75,9 +75,9 @@ func (a *mockAuth) IsChannelAuthorized(claims *auth.Claims, channel string) bool
 // --- mockStore ---
 
 type mockStore struct {
-	history      map[string]*store.HistoryResult
-	pingErr      error
-	historyErr   error
+	history    map[string]*store.HistoryResult
+	pingErr    error
+	historyErr error
 }
 
 func newMockStore() *mockStore {
@@ -85,7 +85,7 @@ func newMockStore() *mockStore {
 }
 
 func (s *mockStore) RunMigrations(ctx context.Context) error { return nil }
-func (s *mockStore) Close()                                    {}
+func (s *mockStore) Close()                                  {}
 
 func (s *mockStore) Ping(ctx context.Context) error {
 	return s.pingErr
@@ -692,12 +692,12 @@ func TestShutdown_ReadyState(t *testing.T) {
 // --- mockKeyManager ---
 
 type mockKeyManager struct {
-	keys       map[string]*keymgmt.CreatedKey
-	createErr  error
-	listErr    error
-	getErr     error
-	revokeErr  error
-	rotateErr  error
+	keys      map[string]*keymgmt.CreatedKey
+	createErr error
+	listErr   error
+	getErr    error
+	revokeErr error
+	rotateErr error
 }
 
 func newMockKeyManager() *mockKeyManager {
@@ -794,7 +794,7 @@ func (m *mockKeyStore) ListAPIKeys(ctx context.Context) ([]store.APIKey, error) 
 func (m *mockKeyStore) GetAPIKeyByHash(ctx context.Context, hash string) (*store.APIKey, error) {
 	return nil, store.ErrAPIKeyNotFound
 }
-func (m *mockKeyStore) RevokeAPIKey(ctx context.Context, id string) error  { return nil }
+func (m *mockKeyStore) RevokeAPIKey(ctx context.Context, id string) error { return nil }
 func (m *mockKeyStore) RotateAPIKey(ctx context.Context, id string, newHash, newPrefix string) error {
 	return nil
 }
@@ -859,7 +859,7 @@ func (m *mockWebhookManager) ReceiveWebhook(ctx context.Context, urlToken string
 // --- tests: v2 keys ---
 
 func TestCreateKey_Success(t *testing.T) {
-	server, _, _, _, _, _ , _ := newTestServerV2(t)
+	server, _, _, _, _, _, _ := newTestServerV2(t)
 
 	body := strings.NewReader(`{"name":"my-key","publish":["orders.*"],"subscribe":["*"],"admin":false}`)
 	resp := doRequest(t, server, "POST", "/api/v2/keys", body, map[string]string{
@@ -883,7 +883,7 @@ func TestCreateKey_Success(t *testing.T) {
 }
 
 func TestCreateKey_DuplicateName(t *testing.T) {
-	server, _, _, _, km, _ , _ := newTestServerV2(t)
+	server, _, _, _, km, _, _ := newTestServerV2(t)
 	km.createErr = store.ErrAPIKeyDuplicateName
 
 	body := strings.NewReader(`{"name":"dup","publish":[],"subscribe":[],"admin":false}`)
@@ -902,7 +902,7 @@ func TestCreateKey_DuplicateName(t *testing.T) {
 }
 
 func TestCreateKey_MissingName(t *testing.T) {
-	server, _, _, _, _, _ , _ := newTestServerV2(t)
+	server, _, _, _, _, _, _ := newTestServerV2(t)
 
 	body := strings.NewReader(`{"publish":[],"subscribe":[],"admin":false}`)
 	resp := doRequest(t, server, "POST", "/api/v2/keys", body, map[string]string{
@@ -915,7 +915,7 @@ func TestCreateKey_MissingName(t *testing.T) {
 }
 
 func TestCreateKey_WithExpiresIn(t *testing.T) {
-	server, _, _, _, _, _ , _ := newTestServerV2(t)
+	server, _, _, _, _, _, _ := newTestServerV2(t)
 
 	body := strings.NewReader(`{"name":"expiring","publish":[],"subscribe":[],"admin":false,"expires_in":"24h"}`)
 	resp := doRequest(t, server, "POST", "/api/v2/keys", body, map[string]string{
@@ -928,7 +928,7 @@ func TestCreateKey_WithExpiresIn(t *testing.T) {
 }
 
 func TestCreateKey_Unauthorized(t *testing.T) {
-	server, _, _, _, _, _ , _ := newTestServerV2(t)
+	server, _, _, _, _, _, _ := newTestServerV2(t)
 
 	body := strings.NewReader(`{"name":"no-auth","publish":[],"subscribe":[],"admin":false}`)
 	resp := doRequest(t, server, "POST", "/api/v2/keys", body, map[string]string{
@@ -941,7 +941,7 @@ func TestCreateKey_Unauthorized(t *testing.T) {
 }
 
 func TestCreateKey_NotAdmin(t *testing.T) {
-	server, _, a, _, _, _ , _ := newTestServerV2(t)
+	server, _, a, _, _, _, _ := newTestServerV2(t)
 	// Add a key that is valid but not admin.
 	a.validAPIKeys["non-admin"] = false
 
@@ -961,7 +961,7 @@ func TestCreateKey_NotAdmin(t *testing.T) {
 }
 
 func TestListKeys_Success(t *testing.T) {
-	server, _, _, _, _, _ , _ := newTestServerV2(t)
+	server, _, _, _, _, _, _ := newTestServerV2(t)
 
 	resp := doRequest(t, server, "GET", "/api/v2/keys", nil, map[string]string{
 		"Authorization": "Bearer valid-key",
@@ -980,7 +980,7 @@ func TestListKeys_Success(t *testing.T) {
 }
 
 func TestListKeys_Empty(t *testing.T) {
-	server, _, _, _, _, _ , _ := newTestServerV2(t)
+	server, _, _, _, _, _, _ := newTestServerV2(t)
 
 	resp := doRequest(t, server, "GET", "/api/v2/keys", nil, map[string]string{
 		"Authorization": "Bearer valid-key",
@@ -992,7 +992,7 @@ func TestListKeys_Empty(t *testing.T) {
 }
 
 func TestListKeys_Unauthorized(t *testing.T) {
-	server, _, _, _, _, _ , _ := newTestServerV2(t)
+	server, _, _, _, _, _, _ := newTestServerV2(t)
 
 	resp := doRequest(t, server, "GET", "/api/v2/keys", nil, map[string]string{
 		"Authorization": "Bearer invalid-key",
@@ -1004,7 +1004,7 @@ func TestListKeys_Unauthorized(t *testing.T) {
 }
 
 func TestGetKey_Success(t *testing.T) {
-	server, _, _, _, km, _ , _ := newTestServerV2(t)
+	server, _, _, _, km, _, _ := newTestServerV2(t)
 	ck, _ := km.CreateKey(context.Background(), "get-test", store.KeyPermissions{}, nil)
 
 	resp := doRequest(t, server, "GET", "/api/v2/keys/"+ck.Meta.ID, nil, map[string]string{
@@ -1024,7 +1024,7 @@ func TestGetKey_Success(t *testing.T) {
 }
 
 func TestGetKey_NotFound(t *testing.T) {
-	server, _, _, _, _, _ , _ := newTestServerV2(t)
+	server, _, _, _, _, _, _ := newTestServerV2(t)
 
 	resp := doRequest(t, server, "GET", "/api/v2/keys/nonexistent", nil, map[string]string{
 		"Authorization": "Bearer valid-key",
@@ -1041,7 +1041,7 @@ func TestGetKey_NotFound(t *testing.T) {
 }
 
 func TestRevokeKey_Success(t *testing.T) {
-	server, _, _, _, km, ks , _ := newTestServerV2(t)
+	server, _, _, _, km, ks, _ := newTestServerV2(t)
 	ck, _ := km.CreateKey(context.Background(), "revoke-test", store.KeyPermissions{}, nil)
 	ks.keys[ck.Meta.ID] = &store.APIKey{ID: ck.Meta.ID, KeyHash: "old-hash"}
 
@@ -1055,7 +1055,7 @@ func TestRevokeKey_Success(t *testing.T) {
 }
 
 func TestRevokeKey_NotFound(t *testing.T) {
-	server, _, _, _, _, _ , _ := newTestServerV2(t)
+	server, _, _, _, _, _, _ := newTestServerV2(t)
 
 	resp := doRequest(t, server, "DELETE", "/api/v2/keys/nonexistent", nil, map[string]string{
 		"Authorization": "Bearer valid-key",
@@ -1067,7 +1067,7 @@ func TestRevokeKey_NotFound(t *testing.T) {
 }
 
 func TestRotateKey_Success(t *testing.T) {
-	server, _, _, _, km, ks , _ := newTestServerV2(t)
+	server, _, _, _, km, ks, _ := newTestServerV2(t)
 	ck, _ := km.CreateKey(context.Background(), "rotate-test", store.KeyPermissions{}, nil)
 	ks.keys[ck.Meta.ID] = &store.APIKey{ID: ck.Meta.ID, KeyHash: "old-hash"}
 

@@ -11,15 +11,15 @@ import (
 )
 
 type createKeyRequest struct {
-	Name       string   `json:"name"`
-	Publish    []string `json:"publish"`
-	Subscribe  []string `json:"subscribe"`
-	Admin      bool     `json:"admin"`
-	ExpiresIn  string   `json:"expires_in"`
+	Name      string   `json:"name"`
+	Publish   []string `json:"publish"`
+	Subscribe []string `json:"subscribe"`
+	Admin     bool     `json:"admin"`
+	ExpiresIn string   `json:"expires_in"`
 }
 
 type keyListResponse struct {
-	OK   bool             `json:"ok"`
+	OK   bool              `json:"ok"`
 	Keys []json.RawMessage `json:"keys"`
 }
 
@@ -29,9 +29,9 @@ type keyGetResponse struct {
 }
 
 type keyCreateResponse struct {
-	OK   bool             `json:"ok"`
-	Key  string           `json:"key"`
-	Meta json.RawMessage  `json:"meta"`
+	OK   bool            `json:"ok"`
+	Key  string          `json:"key"`
+	Meta json.RawMessage `json:"meta"`
 }
 
 // adminMiddleware validates the API key and checks for admin permissions.
@@ -117,9 +117,6 @@ func (s *Server) handleListKeys(w http.ResponseWriter, r *http.Request) {
 	raw := make([]json.RawMessage, len(keys))
 	for i := range keys {
 		raw[i], _ = json.Marshal(keys[i])
-	}
-	if raw == nil {
-		raw = []json.RawMessage{}
 	}
 	writeJSON(w, http.StatusOK, keyListResponse{OK: true, Keys: raw})
 }

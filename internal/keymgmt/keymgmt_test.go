@@ -119,7 +119,7 @@ func TestGenerateKey_Format(t *testing.T) {
 			t.Errorf("expected prefix aek_, got %q", k[:4])
 		}
 		for _, c := range k[4:] {
-			if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' && c != '_' {
 				t.Errorf("invalid Base64url char %q in key suffix", c)
 			}
 		}

@@ -294,8 +294,8 @@ func TestResolveChannel_NullValue(t *testing.T) {
 // Ensure JSON numbers unmarshal to float64 in Go.
 func TestResolveChannel_JSONNumberFormatting(t *testing.T) {
 	type testCase struct {
-		payload   string
-		expectOK  bool
+		payload  string
+		expectOK bool
 	}
 	tests := []testCase{
 		{`{"n": 1}`, true},

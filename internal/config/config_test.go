@@ -86,16 +86,16 @@ auth:
 
 func TestLoad_MissingRequiredFields(t *testing.T) {
 	tests := []struct {
-		name    string
-		yaml    string
-		wantErr string
+		name     string
+		yaml     string
+		wantErr  string
 		clearEnv []string
 	}{
 		{
-			name:   "missing dsn",
+			name: "missing dsn",
 			yaml: `auth:
   jwt_signing_key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`,
-			wantErr: "database.dsn is required",
+			wantErr:  "database.dsn is required",
 			clearEnv: []string{"AETHER_DATABASE_DSN"},
 		},
 		{
@@ -320,8 +320,10 @@ func TestValidate_PositiveConstraints(t *testing.T) {
 			wantErr: "auth.api_keys[0].key must be at least 43 characters",
 		},
 		{
-			name:    "api_key invalid chars",
-			modify:  func(c *Config) { c.Auth.APIKeys = []APIKeyEntry{{Key: "has spaces and special!@#chars here padding!!!", Description: "test"}} },
+			name: "api_key invalid chars",
+			modify: func(c *Config) {
+				c.Auth.APIKeys = []APIKeyEntry{{Key: "has spaces and special!@#chars here padding!!!", Description: "test"}}
+			},
 			wantErr: "auth.api_keys[0].key contains invalid characters",
 		},
 		{
@@ -465,8 +467,8 @@ func TestChannelNameRegex(t *testing.T) {
 func TestMatchRetentionRule(t *testing.T) {
 	cfg := &Config{
 		Retention: RetentionConfig{
-			DefaultTTL:       720 * time.Hour,
-			DefaultMaxCount:  10000,
+			DefaultTTL:      720 * time.Hour,
+			DefaultMaxCount: 10000,
 			Rules: []RetentionRule{
 				{Pattern: "alerts.*", TTL: 24 * time.Hour, MaxCount: 5000},
 				{Pattern: "orders.*", TTL: 2160 * time.Hour, MaxCount: 50000},

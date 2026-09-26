@@ -18,7 +18,7 @@ type Publisher struct {
 	apiKey    string
 	client    *http.Client
 
-	mu       sync.Mutex
+	mu        sync.Mutex
 	latencies []time.Duration
 	successes int64
 	failures  int64
@@ -70,7 +70,10 @@ func (p *Publisher) Publish(ctx context.Context, channel string, payload json.Ra
 		p.recordFailure()
 		return d, fmt.Errorf("do request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		// Response body is read below; close error is not actionable.
+		_ = resp.Body.Close()
+	}()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

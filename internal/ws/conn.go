@@ -42,7 +42,8 @@ func readLoop(ac *activeConn, h hub.Hub, maxMessageSize int, wg *sync.WaitGroup)
 	// conn.Send or Done. Closing hubCnn cancels its context, which fires Done
 	// and unblocks writeLoop and heartbeatLoop, preventing a ServeHTTP deadlock.
 	defer ac.hubCnn.Close()
-	defer ac.wsConn.CloseNow()
+	// CloseNow is best-effort teardown; the close error is not actionable.
+	defer func() { _ = ac.wsConn.CloseNow() }()
 
 	ac.wsConn.SetReadLimit(int64(maxMessageSize))
 
@@ -98,7 +99,8 @@ func readLoop(ac *activeConn, h hub.Hub, maxMessageSize int, wg *sync.WaitGroup)
 
 func writeLoop(ac *activeConn, wg *sync.WaitGroup) {
 	defer wg.Done()
-	defer ac.wsConn.CloseNow()
+	// CloseNow is best-effort teardown; the close error is not actionable.
+	defer func() { _ = ac.wsConn.CloseNow() }()
 
 	for {
 		select {
@@ -117,7 +119,8 @@ func writeLoop(ac *activeConn, wg *sync.WaitGroup) {
 
 func heartbeatLoop(ac *activeConn, pingInterval, pongTimeout time.Duration, wg *sync.WaitGroup) {
 	defer wg.Done()
-	defer ac.wsConn.CloseNow()
+	// CloseNow is best-effort teardown; the close error is not actionable.
+	defer func() { _ = ac.wsConn.CloseNow() }()
 
 	ticker := time.NewTicker(pingInterval)
 	defer ticker.Stop()

@@ -162,7 +162,7 @@ func waitForCursor(t *testing.T, ms *mockCursorStore, subscriberID, channel stri
 func TestHub_Ack_InvalidEntriesRejected(t *testing.T) {
 	h, ms := newTestHubWithCursorStore(t)
 	conn := newTestConnection(t, "c1")
-	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{})
+	mustSubscribe(t, h, conn, []string{"ch"}, SubscribeOptions{})
 	drainFrame(t, conn)
 
 	h.Ack(conn, map[string]int64{"other": 1}) // not subscribed
@@ -214,7 +214,7 @@ func TestHub_Ack_MetricsCountAcceptedOnly(t *testing.T) {
 	}
 	h := New(ms, newMockAuth(), cfg, Metrics{IncAcks: func() { accepted++ }}).(*hubImpl)
 	conn := newTestConnection(t, "c1")
-	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{})
+	mustSubscribe(t, h, conn, []string{"ch"}, SubscribeOptions{})
 	drainFrame(t, conn)
 
 	h.Ack(conn, map[string]int64{"ch": 1, "other": 2, "nope": -1})
@@ -233,7 +233,7 @@ func TestHub_Ack_MetricsCountAcceptedOnly(t *testing.T) {
 func TestHub_Ack_MonotonicAndMergedIntoSingleFlush(t *testing.T) {
 	h, ms := newTestHubWithCursorStore(t)
 	conn := newTestConnection(t, "c1")
-	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{})
+	mustSubscribe(t, h, conn, []string{"ch"}, SubscribeOptions{})
 	drainFrame(t, conn)
 
 	h.Ack(conn, map[string]int64{"ch": 10})
@@ -256,7 +256,7 @@ func TestHub_Ack_MonotonicAndMergedIntoSingleFlush(t *testing.T) {
 func TestHub_AckFlush_FailureKeepsPendingAndRetries(t *testing.T) {
 	h, ms := newTestHubWithCursorStore(t)
 	conn := newTestConnection(t, "c1")
-	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{})
+	mustSubscribe(t, h, conn, []string{"ch"}, SubscribeOptions{})
 	drainFrame(t, conn)
 
 	h.Ack(conn, map[string]int64{"ch": 7})
@@ -278,7 +278,7 @@ func TestHub_AckFlush_FailureKeepsPendingAndRetries(t *testing.T) {
 func TestHub_AckFlush_KeepsCursorAdvancedDuringWrite(t *testing.T) {
 	h, ms := newTestHubWithCursorStore(t)
 	conn := newTestConnection(t, "c1")
-	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{})
+	mustSubscribe(t, h, conn, []string{"ch"}, SubscribeOptions{})
 	drainFrame(t, conn)
 
 	h.Ack(conn, map[string]int64{"ch": 5})
@@ -308,7 +308,7 @@ func TestHub_Resume_ReplaysAfterPersistedCursor(t *testing.T) {
 	conn := newTestConnection(t, "c1")
 	ms.setCursor(conn.SubscriberID, "ch", 3)
 
-	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{Resume: true})
+	mustSubscribe(t, h, conn, []string{"ch"}, SubscribeOptions{Resume: true})
 
 	for want := int64(4); want <= 5; want++ {
 		var mf MessageFrame
@@ -345,7 +345,7 @@ func TestHub_Resume_ExplicitAfterSeqWins(t *testing.T) {
 	conn := newTestConnection(t, "c1")
 	ms.setCursor(conn.SubscriberID, "ch", 3)
 
-	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{
+	mustSubscribe(t, h, conn, []string{"ch"}, SubscribeOptions{
 		AfterSeq: map[string]int64{"ch": 1},
 		Resume:   true,
 	})
@@ -366,7 +366,7 @@ func TestHub_Resume_NoCursorIsLiveOnly(t *testing.T) {
 	publishN(t, h, "ch", 3)
 
 	conn := newTestConnection(t, "c1")
-	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{Resume: true})
+	mustSubscribe(t, h, conn, []string{"ch"}, SubscribeOptions{Resume: true})
 
 	var subscribed SubscribedFrame
 	if err := json.Unmarshal(drainFrame(t, conn), &subscribed); err != nil {
@@ -384,13 +384,13 @@ func TestHub_Resume_UsesPendingCursorBeyondPersisted(t *testing.T) {
 
 	conn1 := newTestConnection(t, "c1")
 	ms.setCursor(conn1.SubscriberID, "ch", 2)
-	h.Subscribe(conn1, []string{"ch"}, SubscribeOptions{})
+	mustSubscribe(t, h, conn1, []string{"ch"}, SubscribeOptions{})
 	drainFrame(t, conn1)
 
 	h.Ack(conn1, map[string]int64{"ch": 5}) // pending, never flushed
 
 	conn2 := sameSubscriberConn(t, "c2", conn1)
-	h.Subscribe(conn2, []string{"ch"}, SubscribeOptions{Resume: true})
+	mustSubscribe(t, h, conn2, []string{"ch"}, SubscribeOptions{Resume: true})
 
 	for want := int64(6); want <= 7; want++ {
 		var mf MessageFrame
@@ -410,7 +410,7 @@ func TestHub_Resume_LoadErrorFailsClosedPerChannel(t *testing.T) {
 	conn := newTestConnection(t, "c1")
 	ms.setLoadErr(errors.New("db down"))
 
-	h.Subscribe(conn, []string{"a", "b"}, SubscribeOptions{
+	mustSubscribe(t, h, conn, []string{"a", "b"}, SubscribeOptions{
 		Resume:   true,
 		AfterSeq: map[string]int64{"b": 0},
 	})
@@ -461,7 +461,7 @@ func TestHub_ReplayHistory_PagesPastSingleBatch(t *testing.T) {
 	publishN(t, h, "ch", 5)
 
 	conn := newTestConnection(t, "c1")
-	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{AfterSeq: map[string]int64{"ch": 0}})
+	mustSubscribe(t, h, conn, []string{"ch"}, SubscribeOptions{AfterSeq: map[string]int64{"ch": 0}})
 
 	seen := 0
 	for i := 0; i < 6; i++ {
@@ -480,11 +480,11 @@ func TestHub_ReplayHistory_GapThenAvailableMessages(t *testing.T) {
 
 	// Simulate eviction of seq 1..3: the earliest available becomes 4.
 	ms.mockStore.mu.Lock()
-	ms.mockStore.messages["ch"] = ms.mockStore.messages["ch"][3:]
+	ms.messages["ch"] = ms.messages["ch"][3:]
 	ms.mockStore.mu.Unlock()
 
 	conn := newTestConnection(t, "c1")
-	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{AfterSeq: map[string]int64{"ch": 0}})
+	mustSubscribe(t, h, conn, []string{"ch"}, SubscribeOptions{AfterSeq: map[string]int64{"ch": 0}})
 
 	var gap GapFrame
 	if err := json.Unmarshal(drainFrame(t, conn), &gap); err != nil {
@@ -511,7 +511,7 @@ func TestHub_Flusher_FinalFlushOnCancel(t *testing.T) {
 	h.config.AckFlushInterval = time.Hour // only the final flush can run
 
 	conn := newTestConnection(t, "c1")
-	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{})
+	mustSubscribe(t, h, conn, []string{"ch"}, SubscribeOptions{})
 	drainFrame(t, conn)
 	h.Ack(conn, map[string]int64{"ch": 42})
 
@@ -530,7 +530,7 @@ func TestHub_Flusher_FlushesOnConnectionRemoval(t *testing.T) {
 	h.config.AckFlushInterval = time.Hour // only the removal signal can trigger
 
 	conn := newTestConnection(t, "c1")
-	h.Subscribe(conn, []string{"ch"}, SubscribeOptions{})
+	mustSubscribe(t, h, conn, []string{"ch"}, SubscribeOptions{})
 	drainFrame(t, conn)
 	h.Ack(conn, map[string]int64{"ch": 11})
 
