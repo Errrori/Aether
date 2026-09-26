@@ -1,7 +1,7 @@
 # Aether — 轻量级实时消息推送中间件
 
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)](https://go.dev/)
-[![CI](https://github.com/Errrori/Aether/actions/workflows/test.yml/badge.svg)](https://github.com/Errrori/Aether/actions/workflows/test.yml)
+[![CI](https://github.com/Errrori/Aether/actions/workflows/ci.yml/badge.svg)](https://github.com/Errrori/Aether/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **English:** Aether is a lightweight real-time message push middleware. **Publish via HTTP, subscribe via WebSocket, persist with PostgreSQL.** Strict pub-sub model — publishers and subscribers are fully decoupled, routed by channel name.
@@ -242,6 +242,31 @@ aether/
 ├── docker-compose.yml
 └── config.example.yaml
 ```
+
+## 发布与部署（CI/CD）
+
+CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 push/PR 到 `main` 时执行：lint（golangci-lint）、单元测试、race 测试、真实 PostgreSQL 集成测试，并验证镜像可构建。
+
+发布流程：
+
+1. 在绿色 `main` 提交上推送语义化 tag（如 `v0.1.0`；预发布用 `v0.1.0-rc.1`，不会移动 `latest`）
+2. [`release.yml`](.github/workflows/release.yml) 通过门禁后构建 `linux/amd64` + `linux/arm64` 镜像并推送 `ghcr.io/errrori/aether`，随后创建 GitHub Release
+3. [`deploy.yml`](.github/workflows/deploy.yml) 在 Release 发布后触发，经 `production` environment 人工审批后 SSH 到服务器：同步 [`deploy/docker-compose.prod.yml`](deploy/docker-compose.prod.yml)、按 tag 拉取镜像、重启容器并验证健康检查
+
+部署前需在仓库 Settings 中配置：
+
+| 位置 | 名称 | 说明 |
+|------|------|------|
+| Environments | `production` | 配置 required reviewers 作为部署审批门禁 |
+| Variables | `SSH_HOST` / `SSH_USER` | 部署服务器地址与用户 |
+| Variables | `SSH_PORT` | SSH 端口（可选，默认 22） |
+| Variables | `DEPLOY_PATH` | 服务器部署目录（如 `/opt/aether`） |
+| Secrets | `SSH_PRIVATE_KEY` | 部署私钥（公钥加入服务器 `authorized_keys`） |
+| Secrets | `SSH_KNOWN_HOSTS` | `ssh-keyscan -p <port> <host>` 输出，固定主机指纹 |
+
+服务器一次性准备：安装 Docker + Compose 插件；目录内准备 `config.yaml` 与 `.env`（格式见 compose 文件头部注释）；GHCR 包若为私有需 `docker login ghcr.io`。
+
+回滚：在 Actions 中手动运行 `deploy` workflow 并填入历史 tag，镜像从 GHCR 拉取，无需重新构建。
 
 ## License
 

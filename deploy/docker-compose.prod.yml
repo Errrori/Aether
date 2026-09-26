@@ -1,0 +1,40 @@
+# Production compose file. deploy.yml syncs this file to DEPLOY_PATH on every
+# release; run it from that directory so `.env` is picked up automatically.
+#
+# Required files next to this compose file:
+#   .env
+#     AETHER_IMAGE_TAG=vX.Y.Z     (maintained by deploy.yml)
+#     AETHER_DATABASE_DSN=postgres://user:pass@host:5432/aether?sslmode=disable
+#     AETHER_PORT=8080            (optional, defaults to 8080)
+#   config.yaml                   (jwt_signing_key, api_keys, retention, ...)
+#
+# One-time server setup:
+#   1. Install docker + the compose plugin.
+#   2. docker login ghcr.io if the GHCR package is private (PAT with read:packages).
+#   3. Create .env and config.yaml as described above.
+#
+# Rollback: dispatch the deploy workflow with a historical tag; the image is
+# pulled from GHCR and no rebuild happens.
+
+services:
+  aether:
+    image: ghcr.io/errrori/aether:${AETHER_IMAGE_TAG:?AETHER_IMAGE_TAG is required}
+    container_name: aether
+    restart: unless-stopped
+    ports:
+      - "${AETHER_PORT:-8080}:8080"
+    environment:
+      AETHER_DATABASE_DSN: ${AETHER_DATABASE_DSN:?AETHER_DATABASE_DSN is required}
+    volumes:
+      - ./config.yaml:/etc/aether/config.yaml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

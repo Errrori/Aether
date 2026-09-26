@@ -1,0 +1,24 @@
+# Repo metadata and tooling (not needed to build the binary)
+.git
+.github
+.claude
+scripts
+
+# Docs and local build artifacts
+docs
+*.md
+*.exe
+*.out
+*.test
+bench_e2e_results.json
+
+# Local/production configuration and compose files (runtime-mounted, never baked in)
+config*.yaml
+docker-compose*.yaml
+docker-compose.yml
+deploy
+
+# Temps
+*.swp
+.DS_Store
+Thumbs.db

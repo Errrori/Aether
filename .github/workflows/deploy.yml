@@ -1,0 +1,102 @@
+name: deploy
+
+# Triggered after release.yml publishes a GitHub Release, or manually for a
+# re-deploy / rollback to a historical tag (no image rebuild involved).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to deploy (e.g. v0.1.0); use a historical tag to roll back"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Requires approval: configure required reviewers on this environment.
+    environment: production
+    env:
+      IMAGE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      # Repository variables (Settings > Secrets and variables > Actions > Variables).
+      SSH_HOST: ${{ vars.SSH_HOST }}
+      SSH_USER: ${{ vars.SSH_USER }}
+      SSH_PORT: ${{ vars.SSH_PORT || '22' }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate inputs
+        run: |
+          if [[ ! "$IMAGE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "::error::invalid image tag: $IMAGE_TAG"
+            exit 1
+          fi
+          if [[ -z "$SSH_HOST" || -z "$SSH_USER" || -z "$DEPLOY_PATH" ]]; then
+            echo "::error::missing repository variables: SSH_HOST, SSH_USER, DEPLOY_PATH"
+            exit 1
+          fi
+
+      - name: Set up SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Upload docker-compose.prod.yml
+        run: |
+          scp -P "$SSH_PORT" -i ~/.ssh/id_ed25519 \
+            deploy/docker-compose.prod.yml \
+            "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/docker-compose.prod.yml"
+
+      - name: Pull image and restart
+        run: |
+          ssh -p "$SSH_PORT" -i ~/.ssh/id_ed25519 "$SSH_USER@$SSH_HOST" bash -s <<EOF
+          set -euo pipefail
+          cd "$DEPLOY_PATH"
+          previous=\$(sed -n 's/^AETHER_IMAGE_TAG=//p' .env || true)
+          echo "previous tag: \${previous:-<none>}"
+          AETHER_IMAGE_TAG="$IMAGE_TAG" docker compose pull aether
+          if grep -q '^AETHER_IMAGE_TAG=' .env; then
+            sed -i "s|^AETHER_IMAGE_TAG=.*|AETHER_IMAGE_TAG=$IMAGE_TAG|" .env
+          else
+            echo "AETHER_IMAGE_TAG=$IMAGE_TAG" >> .env
+          fi
+          AETHER_IMAGE_TAG="$IMAGE_TAG" docker compose up -d aether
+          running=\$(docker inspect -f '{{.Config.Image}}' aether)
+          if [ "\$running" != "ghcr.io/errrori/aether:$IMAGE_TAG" ]; then
+            echo "running image mismatch: \$running (expected ghcr.io/errrori/aether:$IMAGE_TAG)" >&2
+            exit 1
+          fi
+          EOF
+
+      - name: Verify health
+        run: |
+          ssh -p "$SSH_PORT" -i ~/.ssh/id_ed25519 "$SSH_USER@$SSH_HOST" bash -s <<'EOF'
+          for i in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' aether 2>/dev/null || echo missing)
+            if [ "$status" = "healthy" ]; then
+              echo "container is healthy"
+              exit 0
+            fi
+            echo "waiting for healthy ($status)..."
+            sleep 2
+          done
+          echo "container did not become healthy; recent logs:" >&2
+          docker logs --tail 50 aether >&2 || true
+          exit 1
+          EOF

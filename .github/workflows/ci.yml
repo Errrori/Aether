@@ -1,4 +1,4 @@
-name: test
+name: ci
 
 on:
   push:
@@ -6,9 +6,30 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: go.sum
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16-alpine
@@ -28,7 +49,6 @@ jobs:
       # Integration tests read AETHER_TEST_DSN (defaults to port 5433 for the
       # local docker-compose.test.yaml setup).
       AETHER_TEST_DSN: "postgres://aether:aether@localhost:5432/aether?sslmode=disable"
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -45,3 +65,11 @@ jobs:
       # truncates it, so parallel packages would wipe each other's data.
       - name: Integration tests (real PostgreSQL)
         run: go test -v -tags integration -p 1 -count=1 ./...
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image (validation only, no push)
+        run: docker build -t aether:ci .
