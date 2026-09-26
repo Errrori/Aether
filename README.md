@@ -251,7 +251,7 @@ CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 push/PR 到 `m
 
 1. 在绿色 `main` 提交上推送语义化 tag（如 `v0.1.0`；预发布用 `v0.1.0-rc.1`，不会移动 `latest`）
 2. [`release.yml`](.github/workflows/release.yml) 通过门禁后构建 `linux/amd64` + `linux/arm64` 镜像并推送 `ghcr.io/errrori/aether`，随后创建 GitHub Release
-3. [`deploy.yml`](.github/workflows/deploy.yml) 在 Release 发布后触发，经 `production` environment 人工审批后 SSH 到服务器：同步 [`deploy/docker-compose.prod.yml`](deploy/docker-compose.prod.yml)、按 tag 拉取镜像、重启容器并验证健康检查
+3. [`deploy.yml`](.github/workflows/deploy.yml) 在 release workflow 成功后自动触发（`workflow_run`；`GITHUB_TOKEN` 创建 Release 不会触发 workflow），经 `production` environment 人工审批后 SSH 到服务器：同步 [`deploy/docker-compose.prod.yml`](deploy/docker-compose.prod.yml)、按 tag 拉取镜像、重启容器并验证健康检查
 
 部署前需在仓库 Settings 中配置：
 

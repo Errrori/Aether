@@ -1,10 +1,15 @@
 name: deploy
 
-# Triggered after release.yml publishes a GitHub Release, or manually for a
-# re-deploy / rollback to a historical tag (no image rebuild involved).
+# Triggered when the "release" workflow succeeds, or manually for a re-deploy /
+# rollback to a historical tag (no image rebuild involved).
+#
+# `release: published` is intentionally NOT used: a Release created by
+# release.yml with GITHUB_TOKEN does not trigger further workflow runs
+# (GitHub suppresses recursive runs, except workflow_dispatch).
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: [release]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -21,12 +26,15 @@ concurrency:
 
 jobs:
   deploy:
+    # On workflow_run, skip when the release workflow failed; workflow_dispatch
+    # has no workflow_run payload and is always allowed.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Requires approval: configure required reviewers on this environment.
     environment: production
     env:
-      IMAGE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      IMAGE_TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
       # Repository variables (Settings > Secrets and variables > Actions > Variables).
       SSH_HOST: ${{ vars.SSH_HOST }}
       SSH_USER: ${{ vars.SSH_USER }}
