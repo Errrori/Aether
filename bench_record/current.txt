@@ -1,0 +1,46 @@
+goos: windows
+goarch: amd64
+pkg: github.com/aether-mq/aether/internal/hub
+cpu: AMD Ryzen 7 7840HS w/ Radeon 780M Graphics     
+BenchmarkPublish_NoSubscribers-16      	 1391074	       864.0 ns/op	     739 B/op	       3 allocs/op
+BenchmarkPublish_NoSubscribers-16      	 1449027	       875.6 ns/op	     722 B/op	       3 allocs/op
+BenchmarkPublish_NoSubscribers-16      	 1241500	       899.8 ns/op	     694 B/op	       3 allocs/op
+BenchmarkPublish_NoSubscribers-16      	 1261482	       918.7 ns/op	     689 B/op	       3 allocs/op
+BenchmarkPublish_NoSubscribers-16      	 1312213	       920.8 ns/op	     671 B/op	       3 allocs/op
+BenchmarkPublish_NoSubscribers-16      	 1367760	       957.5 ns/op	     658 B/op	       3 allocs/op
+BenchmarkPublish_NoSubscribers-16      	 1337062	       946.6 ns/op	     664 B/op	       3 allocs/op
+BenchmarkPublish_NoSubscribers-16      	 1254672	      1069 ns/op	     689 B/op	       3 allocs/op
+BenchmarkPublish_NoSubscribers-16      	 1000000	      1072 ns/op	     698 B/op	       3 allocs/op
+BenchmarkPublish_NoSubscribers-16      	 1000000	      1085 ns/op	     702 B/op	       3 allocs/op
+BenchmarkPublish_WithSubscribers-16    	  395524	      3423 ns/op	     815 B/op	       4 allocs/op
+BenchmarkPublish_WithSubscribers-16    	  347251	      3426 ns/op	     781 B/op	       4 allocs/op
+BenchmarkPublish_WithSubscribers-16    	  385453	      3468 ns/op	     828 B/op	       4 allocs/op
+BenchmarkPublish_WithSubscribers-16    	  366519	      3572 ns/op	     858 B/op	       4 allocs/op
+BenchmarkPublish_WithSubscribers-16    	  340296	      3507 ns/op	     797 B/op	       4 allocs/op
+BenchmarkPublish_WithSubscribers-16    	  365630	      3547 ns/op	     855 B/op	       4 allocs/op
+BenchmarkPublish_WithSubscribers-16    	  322026	      3510 ns/op	     822 B/op	       4 allocs/op
+BenchmarkPublish_WithSubscribers-16    	  364641	      3486 ns/op	     854 B/op	       4 allocs/op
+BenchmarkPublish_WithSubscribers-16    	  345895	      3665 ns/op	     788 B/op	       4 allocs/op
+BenchmarkPublish_WithSubscribers-16    	  343244	      3600 ns/op	     787 B/op	       4 allocs/op
+BenchmarkPublish_Parallel/optimized-16 	 1591059	       713.8 ns/op	     763 B/op	       4 allocs/op
+BenchmarkPublish_Parallel/optimized-16 	 1731637	       760.4 ns/op	     817 B/op	       4 allocs/op
+BenchmarkPublish_Parallel/optimized-16 	 1623189	       733.5 ns/op	     749 B/op	       4 allocs/op
+BenchmarkPublish_Parallel/optimized-16 	 1634466	       664.4 ns/op	     746 B/op	       4 allocs/op
+BenchmarkPublish_Parallel/optimized-16 	 1631839	       674.7 ns/op	     750 B/op	       4 allocs/op
+BenchmarkPublish_Parallel/optimized-16 	 1684132	       684.7 ns/op	     741 B/op	       4 allocs/op
+BenchmarkPublish_Parallel/optimized-16 	 1754587	       717.1 ns/op	     809 B/op	       4 allocs/op
+BenchmarkPublish_Parallel/optimized-16 	 1571444	       688.7 ns/op	     767 B/op	       4 allocs/op
+BenchmarkPublish_Parallel/optimized-16 	 1622155	       746.6 ns/op	     749 B/op	       4 allocs/op
+BenchmarkPublish_Parallel/optimized-16 	 1743747	       766.4 ns/op	     815 B/op	       4 allocs/op
+BenchmarkPublish_SlowSubscriber/optimized-16         	  355863	      3680 ns/op	     790 B/op	       4 allocs/op
+BenchmarkPublish_SlowSubscriber/optimized-16         	  320606	      3753 ns/op	     834 B/op	       4 allocs/op
+BenchmarkPublish_SlowSubscriber/optimized-16         	  326966	      3764 ns/op	     826 B/op	       4 allocs/op
+BenchmarkPublish_SlowSubscriber/optimized-16         	  314070	      3769 ns/op	     844 B/op	       4 allocs/op
+BenchmarkPublish_SlowSubscriber/optimized-16         	  336733	      3620 ns/op	     812 B/op	       4 allocs/op
+BenchmarkPublish_SlowSubscriber/optimized-16         	  366747	      3543 ns/op	     868 B/op	       4 allocs/op
+BenchmarkPublish_SlowSubscriber/optimized-16         	  370041	      3588 ns/op	     865 B/op	       4 allocs/op
+BenchmarkPublish_SlowSubscriber/optimized-16         	  376453	      3540 ns/op	     855 B/op	       4 allocs/op
+BenchmarkPublish_SlowSubscriber/optimized-16         	  353731	      3536 ns/op	     796 B/op	       4 allocs/op
+BenchmarkPublish_SlowSubscriber/optimized-16         	  357086	      3586 ns/op	     795 B/op	       4 allocs/op
+PASS
+ok  	github.com/aether-mq/aether/internal/hub	106.858s
