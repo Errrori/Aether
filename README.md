@@ -208,6 +208,53 @@ curl -X POST http://localhost:8080/api/v1/publish \
 | **复杂度** | 低 | 中 | 高 |
 | **适用场景** | 轻量实时推送、IoT、通知 | 聊天、协作、实时事件 | 高性能消息队列、事件溯源 |
 
+## 性能基准
+
+所有数字均来自仓库内可复现的基准，不作假。测试环境：AMD Ryzen 7 7840HS（16 逻辑核）、Windows、Go 1.25.0、PostgreSQL 16-alpine（Docker，本机同机）。
+
+### 微基准：Publish 进程内路径（DB 以 mock 隔离）
+
+`BenchmarkPublish_NoSubscribers` 隔离出 hub 的发布代码路径——频道名校验 → 写存储 → 帧序列化 → 扇出。存储层用内存 mock 替换，因此**不含 SQL、TCP、磁盘开销，也不含真实订阅者分发，且不是端到端延迟**；其目的是在不受数据库（毫秒级）淹没的前提下，度量发布路径本身的常数开销。
+
+```bash
+go test -tags bench -run '^$' -bench '^BenchmarkPublish_NoSubscribers$' -benchmem -benchtime=1s -count=20 ./internal/hub/
+```
+
+20 次运行经 [benchstat](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat) 汇总：**均值 1.054 µs ± 4%**（中位数约 1.05 µs，范围 0.82–1.15 µs，约 700 B/op、3 allocs/op）。
+
+### 真实数据库
+
+**Store 单次写入**（真实 PostgreSQL，无 mock）：
+
+```bash
+AETHER_TEST_DSN=postgres://aether:aether@localhost:5433/aether_test?sslmode=disable \
+  go test -tags bench -run '^$' -bench '^BenchmarkWriteMessage$' -benchtime=2s ./internal/store/
+```
+
+实测约 **3.1 ms/op**。
+
+**端到端压测**（HTTP 发布 → PostgreSQL 持久化 → Hub 分发 → WebSocket 接收）：
+
+```bash
+docker compose -f docker-compose.test.yaml up -d
+go run ./cmd/aether -config config.bench.yaml
+go run ./cmd/bench --server=http://localhost:8080 --api-key=<KEY> \
+  --jwt-secret=<SECRET> --scenario=all --duration=10s --output=bench_e2e_results.json
+```
+
+结果保存在 [`bench_e2e_results.json`](bench_e2e_results.json)：
+
+| 场景 | 发布 P99 | 端到端 P99 |
+|------|---------|-----------|
+| 1 频道 1 订阅者 | 8.49 ms | 8.43 ms |
+| 1 频道 100 订阅者 | 9.33 ms | 9.91 ms |
+| 100 频道各 1 订阅者 | 7.88 ms | 7.78 ms |
+| 1 频道 1000 订阅者 | 16.00 ms | 18.67 ms |
+
+其他结果：最大稳定连接 1206、内存 33.6 MB、API Key 缓存命中率 99.98%、历史回放（1000 条）约 10,850 msg/s。
+
+> 端到端延迟由数据库持久化主导（约 3 ms）；891 ns 与端到端 P99 相差约三个数量级——前者是进程内代码路径，后者是含持久化与网络的完整链路，二者不可混用。
+
 ## 开发
 
 ```bash
@@ -227,6 +274,7 @@ go vet ./...
 ```
 aether/
 ├── cmd/aether/        # 入口点
+├── cmd/bench/         # 端到端压测工具
 ├── internal/
 │   ├── config/        # 配置解析
 │   ├── store/         # PostgreSQL 存储引擎
@@ -236,8 +284,9 @@ aether/
 │   ├── ws/            # WebSocket 连接管理
 │   └── metrics/       # Prometheus 指标
 ├── docs/
-│   ├── prd.md         # 产品需求文档
-│   └── SPEC.md        # 实现规格书
+│   ├── prd.md            # 产品需求文档
+│   ├── SPEC.md           # 实现规格书
+│   └── benchmark-plan.md # 性能基准测试方案
 ├── Dockerfile
 ├── docker-compose.yml
 └── config.example.yaml
