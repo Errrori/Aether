@@ -13,24 +13,67 @@
 设计原则：
 - **严格单向推送** — 普通客户端只能接收消息，发布权限仅限持有 API Key 的消息源
 - **开闭原则** — 内核路由消息不解析业务内容，扩展新消息类型时内核无需修改
-- **拼好码** — 复用成熟方案（`pgx`、`coder/websocket`、`golang-jwt`），不自行实现密码学和网络协议
+- **拼好码** — 优先复用成熟方案（`pgx`、`coder/websocket`、`golang-jwt`），不轻易自研或者实现已有优秀可用库的功能
 - **做减法** — 不引入评论、点赞等社交功能，保持内核极简
 
-## 架构
+## 项目结构
 
-```mermaid
-flowchart LR
-    P[Publisher<br/>HTTP POST] --> API[HTTP Handler]
-    API --> Hub[Hub<br/>channel registry<br/>subscription map]
-    Hub --> Store[(PostgreSQL<br/>messages + channels)]
-    Hub --> WS[WebSocket Manager]
-    WS <--> S[Subscriber<br/>WebSocket]
-    API <--> Auth[Auth Module<br/>API Key + JWT]
-    WS <--> Auth
-    Config[Config Module<br/>YAML + env] --> API
-    Config --> Hub
-    Config --> WS
 ```
+aether/
+├── cmd/aether/        # 入口点
+├── cmd/bench/         # 压测
+├── internal/
+│   ├── config/        # 配置解析
+│   ├── store/         # PostgreSQL 存储引擎
+│   ├── auth/          # API Key + JWT 验证
+│   ├── hub/           # 频道注册、订阅管理、消息分发
+│   ├── api/           # HTTP Handler
+│   └── ws/            # WebSocket 连接管理
+└── Dockerfile
+```
+
+## 性能基准
+
+所有数字均来自仓库内可复现的基准，下面展示一次本机自跑测试，测试环境：AMD Ryzen 7 7840HS（16 逻辑核）、Windows、Go 1.25.0、PostgreSQL 16-alpine（Docker，本机同机）。
+
+### Publish 进程内路径（DB 以 mock 隔离）
+`BenchmarkPublish_NoSubscribers` 隔离出 hub 的发布代码路径，只包含：频道名校验 → 写存储 → 帧序列化 → 扇出。存储层用内存 mock 替换，因此**不含 SQL、TCP、磁盘开销，也不含真实订阅者分发，且不是端到端延迟**；其目的是在不受数据库（毫秒级）淹没的前提下，度量发布路径本身的常数开销。
+
+```bash
+go test -tags bench -run '^$' -bench '^BenchmarkPublish_NoSubscribers$' -benchmem -benchtime=1s -count=20 ./internal/hub/
+```
+
+20 次运行经 [benchstat](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat) 汇总：**均值 1.054 µs ± 4%**（中位数约 1.05 µs，范围 0.82–1.15 µs，约 700 B/op、3 allocs/op）。
+
+### 真实数据库
+
+**Store 单次写入**（真实 PostgreSQL，无 mock）：
+```bash
+AETHER_TEST_DSN=postgres://aether:aether@localhost:5433/aether_test?sslmode=disable \
+  go test -tags bench -run '^$' -bench '^BenchmarkWriteMessage$' -benchtime=2s ./internal/store/
+```
+
+实测约 **3.1 ms/op**。
+
+**端到端压测**（HTTP 发布 → PostgreSQL 持久化 → Hub 分发 → WebSocket 接收）：
+
+```bash
+docker compose -f docker-compose.test.yaml up -d
+go run ./cmd/aether -config config.bench.yaml
+go run ./cmd/bench --server=http://localhost:8080 --api-key=<KEY> \
+  --jwt-secret=<SECRET> --scenario=all --duration=10s --output=bench_e2e_results.json
+```
+
+结果保存在 [`bench_e2e_results.json`](bench_e2e_results.json)：
+
+| 场景 | 发布 P99 | 端到端 P99 |
+|------|---------|-----------|
+| 1 频道 1 订阅者 | 8.49 ms | 8.43 ms |
+| 1 频道 100 订阅者 | 9.33 ms | 9.91 ms |
+| 100 频道各 1 订阅者 | 7.88 ms | 7.78 ms |
+| 1 频道 1000 订阅者 | 16.00 ms | 18.67 ms |
+
+其他结果：最大稳定连接 1206、内存 33.6 MB、API Key 缓存命中率 99.98%、历史回放（1000 条）约 10,850 msg/s。
 
 ## 快速开始
 
@@ -57,18 +100,8 @@ curl http://localhost:8080/healthz
 
 > **Windows Git Bash 用户**：需在 `docker compose` 前加 `MSYS_NO_PATHCONV=1` 防止路径转换错误。
 
-### 方式二：预编译二进制
 
-前往 [GitHub Releases](https://github.com/Errrori/Aether/releases) 下载对应平台的二进制文件。
-
-```bash
-# Linux x86_64 示例
-wget https://github.com/Errrori/Aether/releases/latest/download/aether-linux-amd64
-chmod +x aether-linux-amd64
-./aether-linux-amd64 -config config.yaml
-```
-
-### 方式三：手动编译
+### 方式二：手动编译
 
 ```bash
 git clone https://github.com/Errrori/Aether.git
@@ -156,45 +189,6 @@ curl -X POST http://localhost:8080/api/v1/publish \
 }
 ```
 
-## 配置
-
-| 分类 | 关键字段 | 说明 |
-|------|---------|------|
-| `server` | `addr`, `tls_cert`, `tls_key`, `max_payload_size` | 监听地址、TLS、payload 上限 |
-| `database` | `dsn`, `max_open_conns`, `max_idle_conns` | PostgreSQL 连接配置 |
-| `auth` | `jwt_signing_key` **(必填)**, `api_keys` | HS256 密钥 ≥32 字节；API Key 列表 |
-| `websocket` | `ping_interval`, `pong_timeout`, `allowed_origins` | 心跳参数、跨源控制 |
-| `retention` | `default_ttl`, `default_max_count`, `rules` | 消息留存策略，按频道前缀匹配 |
-| `shutdown` | `timeout` | 优雅关闭超时 |
-| `log` | `level`, `format` | 结构化日志 |
-
-环境变量覆盖：`AETHER_<SECTION>_<KEY>`（如 `AETHER_DATABASE_DSN`、`AETHER_LOG_LEVEL`）。
-
-完整配置参考：[config.example.yaml](config.example.yaml) · [PRD §8.3](docs/prd.md)
-
-## API
-
-### HTTP 端点
-
-| 方法 | 路径 | 认证 | 说明 |
-|------|------|------|------|
-| `POST` | `/api/v1/publish` | API Key | 发布消息到频道 |
-| `GET` | `/api/v1/history` | API Key | 检索频道历史消息 |
-| `GET` | `/healthz` | 无 | 健康检查（存储可写 → 200） |
-| `GET` | `/readyz` | 无 | 就绪检查（初始化完成 → 200） |
-| `GET` | `/metricsz` | 无 | Prometheus 指标 |
-
-### WebSocket
-
-| 端点 | 认证 | 说明 |
-|------|------|------|
-| `/ws?token=<jwt>` | JWT（查询参数） | 实时消息推送连接 |
-
-客户端帧：`subscribe`、`unsubscribe`  
-服务端帧：`message`、`subscribed`、`unsubscribed`、`gap`、`error`  
-心跳：WebSocket 标准 Ping/Pong（无应用层心跳）
-
-完整 API 参考：[PRD §5](docs/prd.md)
 
 ## 项目对比
 
@@ -208,114 +202,6 @@ curl -X POST http://localhost:8080/api/v1/publish \
 | **复杂度** | 低 | 中 | 高 |
 | **适用场景** | 轻量实时推送、IoT、通知 | 聊天、协作、实时事件 | 高性能消息队列、事件溯源 |
 
-## 性能基准
-
-所有数字均来自仓库内可复现的基准，不作假。测试环境：AMD Ryzen 7 7840HS（16 逻辑核）、Windows、Go 1.25.0、PostgreSQL 16-alpine（Docker，本机同机）。
-
-### 微基准：Publish 进程内路径（DB 以 mock 隔离）
-
-`BenchmarkPublish_NoSubscribers` 隔离出 hub 的发布代码路径——频道名校验 → 写存储 → 帧序列化 → 扇出。存储层用内存 mock 替换，因此**不含 SQL、TCP、磁盘开销，也不含真实订阅者分发，且不是端到端延迟**；其目的是在不受数据库（毫秒级）淹没的前提下，度量发布路径本身的常数开销。
-
-```bash
-go test -tags bench -run '^$' -bench '^BenchmarkPublish_NoSubscribers$' -benchmem -benchtime=1s -count=20 ./internal/hub/
-```
-
-20 次运行经 [benchstat](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat) 汇总：**均值 1.054 µs ± 4%**（中位数约 1.05 µs，范围 0.82–1.15 µs，约 700 B/op、3 allocs/op）。
-
-### 真实数据库
-
-**Store 单次写入**（真实 PostgreSQL，无 mock）：
-
-```bash
-AETHER_TEST_DSN=postgres://aether:aether@localhost:5433/aether_test?sslmode=disable \
-  go test -tags bench -run '^$' -bench '^BenchmarkWriteMessage$' -benchtime=2s ./internal/store/
-```
-
-实测约 **3.1 ms/op**。
-
-**端到端压测**（HTTP 发布 → PostgreSQL 持久化 → Hub 分发 → WebSocket 接收）：
-
-```bash
-docker compose -f docker-compose.test.yaml up -d
-go run ./cmd/aether -config config.bench.yaml
-go run ./cmd/bench --server=http://localhost:8080 --api-key=<KEY> \
-  --jwt-secret=<SECRET> --scenario=all --duration=10s --output=bench_e2e_results.json
-```
-
-结果保存在 [`bench_e2e_results.json`](bench_e2e_results.json)：
-
-| 场景 | 发布 P99 | 端到端 P99 |
-|------|---------|-----------|
-| 1 频道 1 订阅者 | 8.49 ms | 8.43 ms |
-| 1 频道 100 订阅者 | 9.33 ms | 9.91 ms |
-| 100 频道各 1 订阅者 | 7.88 ms | 7.78 ms |
-| 1 频道 1000 订阅者 | 16.00 ms | 18.67 ms |
-
-其他结果：最大稳定连接 1206、内存 33.6 MB、API Key 缓存命中率 99.98%、历史回放（1000 条）约 10,850 msg/s。
-
-> 端到端延迟由数据库持久化主导（约 3 ms）；891 ns 与端到端 P99 相差约三个数量级——前者是进程内代码路径，后者是含持久化与网络的完整链路，二者不可混用。
-
-## 开发
-
-```bash
-# 运行测试
-go test ./...
-
-# 集成测试（需要 Docker PostgreSQL；-p 1 必填：各包共享同一测试库，并行会互相清空数据）
-docker compose -f docker-compose.test.yaml up -d
-go test -tags=integration -p 1 -count=1 ./...
-
-# 代码检查
-go vet ./...
-```
-
-### 项目结构
-
-```
-aether/
-├── cmd/aether/        # 入口点
-├── cmd/bench/         # 端到端压测工具
-├── internal/
-│   ├── config/        # 配置解析
-│   ├── store/         # PostgreSQL 存储引擎
-│   ├── auth/          # API Key + JWT 验证
-│   ├── hub/           # 频道注册、订阅管理、消息分发
-│   ├── api/           # HTTP Handler
-│   ├── ws/            # WebSocket 连接管理
-│   └── metrics/       # Prometheus 指标
-├── docs/
-│   ├── prd.md            # 产品需求文档
-│   ├── SPEC.md           # 实现规格书
-│   └── benchmark-plan.md # 性能基准测试方案
-├── Dockerfile
-├── docker-compose.yml
-└── config.example.yaml
-```
-
-## 发布与部署（CI/CD）
-
-CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 push/PR 到 `main` 时执行：lint（golangci-lint）、单元测试、race 测试、真实 PostgreSQL 集成测试，并验证镜像可构建。
-
-发布流程：
-
-1. 在绿色 `main` 提交上推送语义化 tag（如 `v0.1.0`；预发布用 `v0.1.0-rc.1`，不会移动 `latest`）
-2. [`release.yml`](.github/workflows/release.yml) 通过门禁后构建 `linux/amd64` + `linux/arm64` 镜像并推送 `ghcr.io/errrori/aether`，随后创建 GitHub Release
-3. [`deploy.yml`](.github/workflows/deploy.yml) 在 release workflow 成功后自动触发（`workflow_run`；`GITHUB_TOKEN` 创建 Release 不会触发 workflow），经 `production` environment 人工审批后 SSH 到服务器：同步 [`deploy/docker-compose.prod.yml`](deploy/docker-compose.prod.yml)、按 tag 拉取镜像、重启容器并验证健康检查
-
-部署前需在仓库 Settings 中配置：
-
-| 位置 | 名称 | 说明 |
-|------|------|------|
-| Environments | `production` | 配置 required reviewers 作为部署审批门禁 |
-| Variables | `SSH_HOST` / `SSH_USER` | 部署服务器地址与用户 |
-| Variables | `SSH_PORT` | SSH 端口（可选，默认 22） |
-| Variables | `DEPLOY_PATH` | 服务器部署目录（如 `/opt/aether`） |
-| Secrets | `SSH_PRIVATE_KEY` | 部署私钥（公钥加入服务器 `authorized_keys`） |
-| Secrets | `SSH_KNOWN_HOSTS` | `ssh-keyscan -p <port> <host>` 输出，固定主机指纹 |
-
-服务器一次性准备：安装 Docker + Compose 插件；目录内准备 `config.yaml` 与 `.env`（格式见 compose 文件头部注释）；GHCR 包若为私有需 `docker login ghcr.io`。
-
-回滚：在 Actions 中手动运行 `deploy` workflow 并填入历史 tag，镜像从 GHCR 拉取，无需重新构建。
 
 ## License
 
